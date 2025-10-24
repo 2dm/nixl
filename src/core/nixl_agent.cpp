@@ -202,20 +202,10 @@ nixlAgent::nixlAgent(const std::string &name, const nixlAgentConfig &cfg) :
 
 nixlAgent::~nixlAgent() {
     if (data && (data->useEtcd || data->config.useListenThread)) {
-        std::cerr << "\n[DESTRUCTOR-" << data->name << " thread:" << std::this_thread::get_id() << "] Called, setting agentShutdown=true" << std::endl;
         data->agentShutdown = true;
-        
-        std::cerr << "[DESTRUCTOR-" << data->name << "] Waiting for commQueue to empty (current size: " << data->commQueue.size() << ")" << std::endl;
-        int wait_iterations = 0;
         while (!data->commQueue.empty()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            wait_iterations++;
-            if (wait_iterations % 10 == 0) {  // Print every 100ms
-                std::cerr << "[DESTRUCTOR-" << data->name << "] ⏳ Still waiting... commQueue size: " << data->commQueue.size() 
-                          << " (waited " << wait_iterations * 10 << "ms)" << std::endl;
-            }
         }
-        std::cerr << "[DESTRUCTOR-" << data->name << "] ✓ commQueue is empty, proceeding to stop commThread" << std::endl;
 
         data->commThreadStop = true;
         if(data->commThread.joinable()) data->commThread.join();
@@ -1468,7 +1458,7 @@ nixlAgent::genNotif(const std::string &remote_agent,
         }
     }
 
-    // NIXL_ERROR_FUNC << "no specified or potential backend could send the inter-agent notifications";
+    NIXL_ERROR_FUNC << "no specified or potential backend could send the inter-agent notifications";
     return NIXL_ERR_NOT_FOUND;
 }
 
@@ -1706,13 +1696,6 @@ nixlAgent::invalidateRemoteMD(const std::string &remote_agent) {
 
 nixl_status_t
 nixlAgent::sendLocalMD (const nixl_opt_args_t* extra_params) const {
-    static std::atomic<int> send_count{0};
-    int count = ++send_count;
-    if (count <= 3 || count % 100 == 0) {
-        std::cerr << "[SEND_MD #" << count << "] Agent '" << data->name << "' calling sendLocalMD (thread: " 
-                  << std::this_thread::get_id() << ")" << std::endl;
-    }
-    
     nixl_blob_t myMD;
     nixl_status_t ret = getLocalMD(myMD);
     if (ret < 0) {
@@ -1722,7 +1705,6 @@ nixlAgent::sendLocalMD (const nixl_opt_args_t* extra_params) const {
 
     // If IP is provided, use socket-based communication
     if (extra_params && !extra_params->ipAddr.empty()) {
-        NIXL_DEBUG << "[SEND_MD] Enqueueing SOCK_SEND work";
         data->enqueueCommWork(std::make_tuple(SOCK_SEND, extra_params->ipAddr, extra_params->port, std::move(myMD)));
         return NIXL_SUCCESS;
     }
@@ -1730,7 +1712,6 @@ nixlAgent::sendLocalMD (const nixl_opt_args_t* extra_params) const {
 #if HAVE_ETCD
     // If no IP is provided, use etcd (now via thread)
     if (data->useEtcd) {
-        NIXL_DEBUG << "[SEND_MD] Enqueueing ETCD_SEND work";
         data->enqueueCommWork(std::make_tuple(ETCD_SEND, default_metadata_label, 0, std::move(myMD)));
         return NIXL_SUCCESS;
     }
