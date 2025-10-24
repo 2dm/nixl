@@ -98,6 +98,7 @@ int connectToIP(std::string ip_addr, int port) {
 
 void
 sendCommMessage(int fd, const std::string& msg) {
+    std::cerr << "[sendCommMessage] fd=" << fd << ", msg_size=" << msg.size() << ", about to send..." << std::endl;
     size_t size = msg.size();
     constexpr size_t iov_size = 2;
     struct iovec iov[iov_size] = {
@@ -106,7 +107,9 @@ sendCommMessage(int fd, const std::string& msg) {
     };
 
     for (size_t i = 0, offset = 0, sent = 0; i < iov_size;) {
+        std::cerr << "[sendCommMessage] Calling send() on fd=" << fd << ", i=" << i << ", offset=" << offset << " ..." << std::endl;
         auto bytes = send(fd, static_cast<char *>(iov[i].iov_base) + offset, iov[i].iov_len - offset, 0);
+        std::cerr << "[sendCommMessage] ✓ send() RETURNED! bytes=" << bytes << ", errno=" << errno << " (" << strerror(errno) << ")" << std::endl;
         if (bytes < 0) {
             if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
                 continue;
@@ -445,7 +448,15 @@ void nixlAgentData::commWorker(nixlAgent* myAgent){
     }
 #endif // HAVE_ETCD
 
+    std::cerr << "[COMMTHREAD-" << name << " tid:" << std::this_thread::get_id() << "] Started" << std::endl;
+    int loop_count = 0;
+    
     while(!(commThreadStop)) {
+        loop_count++;
+        if (loop_count <= 5 || loop_count % 100 == 0) {
+            std::cerr << "[COMMTHREAD-" << name << " #" << loop_count << "] Iteration, commThreadStop=" << commThreadStop << std::endl;
+        }
+        
         std::vector<nixl_comm_req_t> work_queue;
 
         // first, accept new connections
@@ -485,8 +496,13 @@ void nixlAgentData::commWorker(nixlAgent* myAgent){
 
         // second, do agent commands
         getCommWork(work_queue);
+        
+        if (!work_queue.empty()) {
+            std::cerr << "[COMMTHREAD-" << name << "] Got " << work_queue.size() << " work items from queue" << std::endl;
+        }
 
         for(const auto &request: work_queue) {
+            std::cerr << "[COMMTHREAD-" << name << "] Processing work item..." << std::endl;
 
             // TODO: req_ip and req_port are relevant only for SOCK_*, need different request structure for ETCD_*
             const auto &[req_command, req_ip, req_port, my_MD] = request;
@@ -515,21 +531,29 @@ void nixlAgentData::commWorker(nixlAgent* myAgent){
 
             switch(req_command) {
             case SOCK_SEND: {
+                std::cerr << "[COMMTHREAD-" << name << "] Executing SOCK_SEND to fd=" << client_fd << std::endl;
                 sendCommMessage(client_fd, "NIXLCOMM:LOAD" + my_MD);
+                std::cerr << "[COMMTHREAD-" << name << "] SOCK_SEND complete" << std::endl;
                 break;
             }
             case SOCK_FETCH: {
+                std::cerr << "[COMMTHREAD-" << name << "] Executing SOCK_FETCH from fd=" << client_fd << std::endl;
                 sendCommMessage(client_fd, "NIXLCOMM:SEND");
+                std::cerr << "[COMMTHREAD-" << name << "] SOCK_FETCH complete" << std::endl;
                 break;
             }
             case SOCK_INVAL: {
+                std::cerr << "[COMMTHREAD-" << name << "] Executing SOCK_INVAL to fd=" << client_fd << ", sending INVL for agent '" << name << "'" << std::endl;
+                std::cerr << "[COMMTHREAD-" << name << "] About to call sendCommMessage..." << std::endl;
                 sendCommMessage(client_fd, "NIXLCOMM:INVL" + name);
+                std::cerr << "[COMMTHREAD-" << name << "] SOCK_INVAL complete" << std::endl;
                 break;
             }
 #if HAVE_ETCD
                 // ETCD operations using existing methods
                 case ETCD_SEND:
                 {
+                    std::cerr << "[COMMTHREAD] Executing ETCD_SEND" << std::endl;
                     if (!useEtcd) {
                         throw std::runtime_error("ETCD is not enabled");
                     }
@@ -538,10 +562,12 @@ void nixlAgentData::commWorker(nixlAgent* myAgent){
                     const std::string &metadata_label = req_ip;
 
                     // Use local storeMetadataInEtcd function
+                    std::cerr << "[COMMTHREAD] Calling storeMetadataInEtcd..." << std::endl;
                     nixl_status_t ret = etcdClient->storeMetadataInEtcd(name, metadata_label, my_MD);
                     if (ret != NIXL_SUCCESS) {
                         NIXL_ERROR << "Failed to store metadata in etcd: " << ret;
                     }
+                    std::cerr << "[COMMTHREAD] ETCD_SEND complete" << std::endl;
                     break;
                 }
                 case ETCD_FETCH:
@@ -587,6 +613,30 @@ void nixlAgentData::commWorker(nixlAgent* myAgent){
                     if (ret != NIXL_SUCCESS) {
                         NIXL_ERROR << "Failed to invalidate metadata in etcd: " << ret;
                     }
+                    break;
+                }
+                case ETCD_REMOVE_REMOTE:
+                {
+                    if (!useEtcd) {
+                        throw std::runtime_error("ETCD is not enabled");
+                    }
+
+                    // The remote agent name is passed in the my_MD field
+                    const std::string &remote_agent = my_MD;
+                    
+                    std::cerr << "[COMMTHREAD-" << name << "] Executing ETCD_REMOVE_REMOTE for agent: " 
+                             << remote_agent << std::endl;
+                    
+                    nixl_status_t ret = etcdClient->removeMetadataFromEtcd(remote_agent);
+                    if (ret != NIXL_SUCCESS) {
+                        NIXL_ERROR << "Failed to remove remote agent '" << remote_agent 
+                                   << "' metadata from etcd: " << ret;
+                    } else {
+                        NIXL_INFO << "Successfully removed stale metadata for remote agent '" 
+                                  << remote_agent << "' from ETCD";
+                    }
+                    
+                    std::cerr << "[COMMTHREAD-" << name << "] ETCD_REMOVE_REMOTE complete" << std::endl;
                     break;
                 }
 #endif // HAVE_ETCD
@@ -654,16 +704,27 @@ void nixlAgentData::commWorker(nixlAgent* myAgent){
         }
 #endif // HAVE_ETCD
 
+        if (loop_count <= 5 || loop_count % 100 == 0) {
+            std::cerr << "[COMMTHREAD-" << name << " #" << loop_count << "] End of iteration, sleeping..." << std::endl;
+        }
+        
         nixlTime::us_t start = nixlTime::getUs();
         while( (start + config.lthrDelay) > nixlTime::getUs()) {
             std::this_thread::yield();
         }
     }
+    
+    std::cerr << "[COMMTHREAD-" << name << "] Exiting (commThreadStop=" << commThreadStop << ")" << std::endl;
 }
 
 void nixlAgentData::enqueueCommWork(nixl_comm_req_t request){
     if (agentShutdown) {
-        NIXL_WARN << "Agent shutting down, unable to accept new requests";
+        static std::atomic<int> reject_count{0};
+        int count = ++reject_count;
+        if (count <= 5 || count % 1000 == 0) {  // Print first 5, then every 1000th
+            std::cerr << "[ENQUEUE_REJECTED #" << count << "] Agent '" << name 
+                      << "' shutting down, rejecting work (thread: " << std::this_thread::get_id() << ")" << std::endl;
+        }
         return;
     }
     std::lock_guard<std::mutex> lock(commLock);

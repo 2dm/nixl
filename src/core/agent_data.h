@@ -46,7 +46,8 @@ enum nixl_comm_t {
 #if HAVE_ETCD
     ETCD_SEND,
     ETCD_FETCH,
-    ETCD_INVAL
+    ETCD_INVAL,
+    ETCD_REMOVE_REMOTE  // Remove remote agent's stale metadata from ETCD
 #endif // HAVE_ETCD
 };
 

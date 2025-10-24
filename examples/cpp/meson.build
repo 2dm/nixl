@@ -27,6 +27,13 @@ if etcd_dep.found()
                include_directories: [nixl_inc_dirs, utils_inc_dirs],
                link_with: [serdes_lib],
                install: true)
+    
+    remove_stale_metadata_test = executable('nixl_remove_stale_metadata_test',
+               'nixl_remove_stale_metadata_test.cpp',
+               dependencies: [nixl_dep, nixl_infra, nixl_common_deps, nixl_test_utils_dep],
+               include_directories: [nixl_inc_dirs, utils_inc_dirs],
+               link_with: [serdes_lib],
+               install: true)
 endif
 
 telemetry_reader = executable('telemetry_reader',

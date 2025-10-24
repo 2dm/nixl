@@ -470,6 +470,18 @@ class nixlAgent {
         nixl_status_t
         invalidateRemoteMD (const std::string &remote_agent);
 
+        /**
+         * @brief  Remove a remote agent's metadata from ETCD.
+         *         This is useful when a remote agent has crashed/failed and left stale
+         *         metadata that needs to be cleaned up before it can rejoin.
+         *
+         * @param  remote_agent  Remote agent name whose metadata should be removed from ETCD
+         * @return nixl_status_t Error code if call was not successful
+         *                       Returns NIXL_ERR_NOT_SUPPORTED if ETCD is not enabled
+         */
+        nixl_status_t
+        removeRemoteMetadata (const std::string &remote_agent) const;
+
         /*** Metadata handling through direct channels (p2p socket and ETCD) ***/
         /**
          * @brief  Send your own agent metadata to a remote location.
