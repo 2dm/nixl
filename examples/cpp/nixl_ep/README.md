@@ -1,10 +1,8 @@
-# NIXL EP: Expert-Parallel Communication Library
+# NIXL EP: Expert-Parallel Communication Example
 
 ## Overview
 
-NIXL EP is a high-performance expert-parallel communication library that provides elastic scaling capabilities for Mixture of Experts (MoE) models. It enables dynamic addition and removal of processes (ranks) during runtime without disrupting existing connections.
-
-NIXL EP is built on top of [NVIDIA Inference Xfer Library (NIXL)](https://github.com/ai-dynamo/nixl)'s device API, leveraging its RDMA and NVLink support for optimal performance.
+NIXL EP is a complete example implementation of expert-parallel communication for Mixture of Experts (MoE) models built on top of [NIXL](https://github.com/ai-dynamo/nixl)'s device API. It provides elastic scaling capabilities, enabling dynamic addition and removal of processes (ranks) during runtime without disrupting existing connections, and leverages NIXL's RDMA and NVLink support for optimal performance.
 
 ## Features
 - **Dispatch and Combine support**: Supports dispatch and combine operations for MoE inference
