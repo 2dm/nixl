@@ -154,7 +154,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
             }
             asm volatile("bar.sync 1, %0;" :: "r"(num_threads));
 
-            // Issue IBGDA sends
+            // Issue NIXL sends
             if (dst_expert_idx >= 0) {
                 int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1) : 0;
                 slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
@@ -643,7 +643,7 @@ combine(void* combined_x,
             atomic_add_release_global(atomic_clean_flag, num_experts);
     }
 
-    // Issue IBGDA sends
+    // Issue NIXL sends
     if (responsible_expert_idx < num_experts) {
         const auto dst_rank = responsible_expert_idx / num_local_experts;
         const auto local_expert_idx = responsible_expert_idx % num_local_experts;
@@ -689,7 +689,7 @@ combine(void* combined_x,
             return min(kNumTMABufferBytes, static_cast<int>((hidden_bf16_int4 - offset_int4) * sizeof(int4)));
         };
 
-        // Issue IBGDA send
+        // Issue NIXL send
         if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
             for (int token_idx = offset + sub_warp_id; token_idx < offset + num_tokens_to_send; token_idx += num_warps_per_group) {
                 const auto x_int4 = local_x + token_idx * hidden_bf16_int4;

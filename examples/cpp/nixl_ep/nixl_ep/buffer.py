@@ -177,9 +177,8 @@ class Buffer:
                              async_finish: bool = False, return_recv_hook: bool = False) -> \
             Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, Tuple, EventOverlap, Callable]:
         """
-        A low-latency implementation for dispatching with IBGDA.
+        A low-latency implementation for dispatching with NIXL device API.
         This kernel requires all the ranks (no matter intranode or internode) should be visible via RDMA
-            (specifically, IBGDA must be enabled).
         Warning: as there are only two buffers, and the returned tensors reuse the buffer, you cannot hold more than 2
             kernels' result tensors at a single moment.
 
@@ -245,9 +244,8 @@ class Buffer:
                             combine_wait_recv_cost_stats: Optional[torch.Tensor] = None) -> \
             Tuple[torch.Tensor, EventOverlap, Callable]:
         """
-        A low-latency implementation for combining tokens (reduce **with weights**) with IBGDA.
+        A low-latency implementation for combining tokens (reduce **with weights**) with NIXL device API.
         This kernel requires all the ranks (no matter intranode or internode) should be visible via RDMA
-            (specifically, IBGDA must be enabled).
         Warning: as there are only two buffers, and the returned tensors reuse the buffer, you cannot hold more than 2
             kernels' result tensors at a single moment.
 
