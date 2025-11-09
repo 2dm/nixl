@@ -7,7 +7,7 @@ NIXL EP is a high-performance expert-parallel communication library that provide
 NIXL EP is built on top of [NVIDIA Inference Xfer Library (NIXL)](https://github.com/ai-dynamo/nixl)'s device API, leveraging its RDMA and NVLink support for optimal performance.
 
 ## Features
-- **Dispatch and Combine support**: Supports low-latency dispatch and combine operations for MoE inference
+- **Dispatch and Combine support**: Supports dispatch and combine operations for MoE inference
 - **RDMA and NVLink support**: Utilizes NIXL's abstractions to support both RDMA and NVLink transports for optimal performance
 - **Elastic Scaling**: Dynamically add or remove ranks during runtime
 
@@ -40,7 +40,7 @@ buffer.remove_ranks(ranks_to_remove)
 
 ## Key APIs
 
-- `Buffer(rank_id, low_latency_nvlink_backend, explicitly_destroy)`: Initialize the NIXL communication buffer
+- `Buffer(rank_id, nvlink_backend, explicitly_destroy)`: Initialize the NIXL communication buffer
 - `update_memory_buffers(num_ranks, num_experts_per_rank, num_rdma_bytes)`: Prepare buffers for up to `num_ranks` ranks and `num_experts_per_rank` experts
 - `connect_ranks(remote_ranks)`: Establish NIXL connections to new peers (can be called multiple times)
 - `remove_ranks(remote_ranks)`: Clean up connections to departing peers

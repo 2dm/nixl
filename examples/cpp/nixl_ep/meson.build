@@ -52,7 +52,7 @@ endif
 
 nixl_ep_sources = [
     'csrc/nixl_ep.cpp',
-    'csrc/kernels/internode_ll.cu',
+    'csrc/kernels/internode.cu',
 ]
 
 nixl_ep_inc_dirs = [

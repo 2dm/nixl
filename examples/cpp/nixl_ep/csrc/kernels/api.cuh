@@ -7,8 +7,8 @@
 
 namespace nixl_ep {
 
-// Internode low-latency kernels
-namespace internode_ll {
+// Internode kernels
+namespace internode {
 struct gpu_nixl_ctx {
     uint64_t *local_counters; // [local_expert_id][src_rank]
     uint64_t *clean_counters; // Counters to be cleaned for the next iteration
@@ -72,7 +72,7 @@ struct gpu_nixl_ctx {
     }
 };
 
-void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
+void clean_buffer(int* clean_0, int num_clean_int_0,
                               int* clean_1, int num_clean_int_1,
                               int rank, int num_ranks, int* mask_buffer, int* sync_buffer,
                               cudaStream_t stream);
@@ -90,7 +90,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int num_topk, int num_experts, int rank, int num_ranks,
               bool use_fp8, bool round_scale, bool use_ue8m0,
               void* workspace, int num_device_sms,
-              cudaStream_t stream, int phases, internode_ll::gpu_nixl_ctx nixl_ctx);
+              cudaStream_t stream, int phases, internode::gpu_nixl_ctx nixl_ctx);
 
 void combine(void* combined_x,
              void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
@@ -103,9 +103,9 @@ void combine(void* combined_x,
              int num_topk, int num_experts, int rank, int num_ranks,
              bool use_logfmt,
              void* workspace, int num_device_sms,
-             cudaStream_t stream, int phases, bool zero_copy, internode_ll::gpu_nixl_ctx nixl_ctx);
+             cudaStream_t stream, int phases, bool zero_copy, internode::gpu_nixl_ctx nixl_ctx);
 
-void sync(internode_ll::gpu_nixl_ctx nixl_ctx, cudaStream_t stream);
+void sync(internode::gpu_nixl_ctx nixl_ctx, cudaStream_t stream);
 
 void query_mask_buffer(int* mask_buffer_ptr, int num_ranks, int* output_mask_tensor, cudaStream_t stream);
 
@@ -113,6 +113,6 @@ void update_mask_buffer(int* mask_buffer_ptr, int rank_to_mask, bool mask, cudaS
 
 void clean_mask_buffer(int* mask_buffer_ptr, int num_ranks, cudaStream_t stream);
 
-} // namespace internode_ll
+} // namespace internode
 
 } // namespace nixl_ep

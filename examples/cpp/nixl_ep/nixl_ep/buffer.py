@@ -11,10 +11,10 @@ from .utils import EventOverlap
 
 class Buffer:
     """
-    The core expert-parallel (EP) communication buffers for Mixture of Experts (MoE) model, which supports:
-        - low-latency dispatch and combine, using NVLink and RDMA
+    The core expert-parallel (EP) communication buffers for Mixture of Experts (MoE) model, which supports dispatch and combine operations using NVLink and RDMA.
 
     Attributes:
+        nvlink_backend: the backend for NVLink communication, you can choose from 'nixl', 'ipc' and 'none' (which disables NVLink entirely).
         rank: the local rank number.
         num_rdma_bytes: the buffer size for RDMA communication.
         runtime: the C++ runtime.
@@ -22,20 +22,20 @@ class Buffer:
 
     num_sms: int = 20
 
-    def __init__(self, low_latency_nvlink_backend: Literal['nixl', 'ipc', 'none'] = 'nixl',
+    def __init__(self, nvlink_backend: Literal['nixl', 'ipc', 'none'] = 'nixl',
                  explicitly_destroy: bool = False, rank: int = 0, enable_shrink: bool = False,
                  group: dist.ProcessGroup = None, comm: Optional["mpi4py.MPI.Comm"] = None) -> None:
         """
         Initialize the nixl communication buffer.
 
         Arguments:
-            low_latency_nvlink_backend: the backend for low-latency mode, you can choose from 'nixl', 'ipc' and 'none' (which disables NVLink entirely).
+            nvlink_backend: nvlink implementation to use, you can choose from 'nixl', 'ipc' and 'none' (which disables NVLink entirely).
             explicitly_destroy: If this flag is set to True, you need to explicitly call `destroy()` to release resources;
                 otherwise, the resources will be released by the destructor.
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
             rank: the rank number.
-            group: the communication group (optional for low-latency mode).
-            comm: the mpi4py.MPI.Comm communicator to use in case the group parameter is absent (optional for low-latency mode).
+            group: the communication group (optional).
+            comm: the mpi4py.MPI.Comm communicator to use in case the group parameter is absent (optional).
         """
         self.rank = rank
         self.group_size = 0 # Will be updated by `update_memory_buffers`
@@ -44,9 +44,9 @@ class Buffer:
         self.comm = comm
         assert not (group and comm)
 
-        # Configure NVLINK backend for low-latency mode
-        os.environ['NIXL_EP_LL_NVLINK_IPC'] = '1' if low_latency_nvlink_backend == 'ipc' else '0'
-        if low_latency_nvlink_backend != 'nixl':
+        # Configure NVLINK backend
+        os.environ['NIXL_EP_NVLINK_BACKEND_IPC'] = '1' if nvlink_backend == 'ipc' else '0'
+        if nvlink_backend != 'nixl':
             os.environ["UCX_TLS"] = "^cuda_ipc"
 
         self.runtime = nixl_ep_cpp.Buffer(self.rank, explicitly_destroy, enable_shrink)
@@ -89,7 +89,7 @@ class Buffer:
         return EventOverlap(EventHandle())
 
     @staticmethod
-    def get_low_latency_rdma_size_hint(num_max_dispatch_tokens_per_rank: int, hidden: int, num_ranks: int, num_experts: int) -> int:
+    def get_rdma_size_hint(num_max_dispatch_tokens_per_rank: int, hidden: int, num_ranks: int, num_experts: int) -> int:
         """
         Get a minimum size requirement for the RDMA buffer. The size calculation will be done with BF16.
 
@@ -102,7 +102,7 @@ class Buffer:
         Returns:
             size: the RDMA buffer size recommended.
         """
-        return nixl_ep_cpp.get_low_latency_rdma_size_hint(num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts)
+        return nixl_ep_cpp.get_rdma_size_hint(num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts)
     
     def get_comm_stream(self) -> torch.Stream:
         """
@@ -141,22 +141,20 @@ class Buffer:
             bias_0, bias_1 = bias
         return bias_0, bias_1
 
-    def clean_low_latency_buffer(self, num_max_dispatch_tokens_per_rank: int, hidden: int, num_experts: int) -> None:
+    def clean_buffer(self, num_max_dispatch_tokens_per_rank: int, hidden: int, num_experts: int) -> None:
         """
-        As low-latency kernels require part of the buffer to be zero-initialized, so it is vital to clean the buffer
+        As the kernels require part of the buffer to be zero-initialized, so it is vital to clean the buffer
             if the buffer is dirty at some time.
-        For example, after running the normal dispatch/combine, you must run this function before executing any
-            low-latency kernel.
 
         Arguments:
             num_max_dispatch_tokens_per_rank: the maximum number of tokens to dispatch, all the ranks must hold the same value.
             hidden: the hidden dimension of each token.
             num_experts: the number of all experts.
         """
-        self.runtime.clean_low_latency_buffer(num_max_dispatch_tokens_per_rank, hidden, num_experts)
+        self.runtime.clean_buffer(num_max_dispatch_tokens_per_rank, hidden, num_experts)
 
     # noinspection PyTypeChecker
-    def low_latency_dispatch(self, x: torch.Tensor, topk_idx: torch.Tensor,
+    def dispatch(self, x: torch.Tensor, topk_idx: torch.Tensor,
                              num_max_dispatch_tokens_per_rank: int, num_experts: int,
                              cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
                              dispatch_wait_recv_cost_stats: Optional[torch.Tensor] = None,
@@ -168,7 +166,7 @@ class Buffer:
         This kernel requires all the ranks (no matter intranode or internode) should be visible via RDMA
             (specifically, IBGDA must be enabled).
         Warning: as there are only two buffers, and the returned tensors reuse the buffer, you cannot hold more than 2
-            low-latency kernels' result tensors at a single moment.
+            kernels' result tensors at a single moment.
 
         Arguments:
             x: `torch.Tensor` with `torch.bfloat16`, shaped as `[num_tokens, hidden]`, only several hidden shapes are
@@ -206,12 +204,12 @@ class Buffer:
                 as we do not synchronize CPU received count with GPU (also not incompatible with CUDA graph if synced).
             recv_count: a tensor shaped `[num_local_experts]` with type `torch.int`, indicating how many tokens each
                 expert receives. As mentioned before, not all tokens are valid in `recv_x`.
-            handle: the communication handle to be used in the `low_latency_combine` function.
+            handle: the communication handle to be used in the `combine` function.
             event: the event after executing the kernel (valid only if `async_finish` is set).
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
         packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, hook = \
-            self.runtime.low_latency_dispatch(x, topk_idx,
+            self.runtime.dispatch(x, topk_idx,
                                               cumulative_local_expert_recv_stats,
                                               dispatch_wait_recv_cost_stats,
                                               num_max_dispatch_tokens_per_rank, num_experts,
@@ -226,7 +224,7 @@ class Buffer:
             EventOverlap(event, tensors_to_record if async_finish else None), hook
 
     # noinspection PyTypeChecker
-    def low_latency_combine(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor,
+    def combine(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor,
                             handle: tuple, use_logfmt: bool = False, zero_copy: bool = False, async_finish: bool = False,
                             return_recv_hook: bool = False, out: Optional[torch.Tensor] = None,
                             combine_wait_recv_cost_stats: Optional[torch.Tensor] = None) -> \
@@ -236,7 +234,7 @@ class Buffer:
         This kernel requires all the ranks (no matter intranode or internode) should be visible via RDMA
             (specifically, IBGDA must be enabled).
         Warning: as there are only two buffers, and the returned tensors reuse the buffer, you cannot hold more than 2
-            low-latency kernels' result tensors at a single moment.
+            kernels' result tensors at a single moment.
 
         Arguments:
             x: `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]` with `torch.bfloat16`,
@@ -249,7 +247,7 @@ class Buffer:
             handle: the communication handle given by the `dispatch` function.
             use_logfmt: whether to use an internal "LogFMT with dynamic per-64-channel cast" format (10 bits).
             zero_copy: whether the tensor is already copied into the RDMA buffer, should be cooperative
-                with `get_next_low_latency_combine_buffer`.
+                with `get_next_combine_buffer`.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
             return_recv_hook: return a receiving hook if set. If set, the kernel will just do the RDMA request issues,
                 but **without actually receiving the data**. You must call the received hook to make sure the data's arrival.
@@ -265,7 +263,7 @@ class Buffer:
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
-        combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
+        combined_x, event, hook = self.runtime.combine(x, topk_idx, topk_weights, src_info, layout_range,
                                                                    combine_wait_recv_cost_stats,
                                                                    num_max_dispatch_tokens_per_rank, num_experts,
                                                                    use_logfmt, zero_copy, async_finish, return_recv_hook,
@@ -273,7 +271,7 @@ class Buffer:
         tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
         return combined_x, EventOverlap(event, tensors_to_record if async_finish else None), hook
 
-    def low_latency_update_mask_buffer(self, rank_to_mask: int, mask: bool = False):
+    def update_mask_buffer(self, rank_to_mask: int, mask: bool = False):
         """
         Mask (unmask) a rank during communication (dispatch, combine, and clean)
 
@@ -282,9 +280,9 @@ class Buffer:
             mask: if True, will mask the rank (do not recvfrom/sendto the rank), otherwise will unmask the rank.
 
         """
-        self.runtime.low_latency_update_mask_buffer(rank_to_mask, mask)
+        self.runtime.update_mask_buffer(rank_to_mask, mask)
 
-    def low_latency_query_mask_buffer(self, mask_status: torch.Tensor):
+    def query_mask_buffer(self, mask_status: torch.Tensor):
         """
         Query the mask status of all ranks
 
@@ -292,29 +290,29 @@ class Buffer:
             mask_status: `[num_ranks]` with `torch.int`, the mask status of each rank. `1` means mask and `0` means unmasked.
 
         """
-        self.runtime.low_latency_query_mask_buffer(mask_status)
+        self.runtime.query_mask_buffer(mask_status)
 
-    def low_latency_clean_mask_buffer(self):
+    def clean_mask_buffer(self):
         """
         Clean the mask buffer
 
         """
-        self.runtime.low_latency_clean_mask_buffer()
+        self.runtime.clean_mask_buffer()
 
-    def get_next_low_latency_combine_buffer(self, handle: object):
+    def get_next_combine_buffer(self, handle: object):
         """
-        Get the raw registered RDMA buffer tensor for next low-latency combine, so that the next combine kernel can skip the copying.
+        Get the raw registered RDMA buffer tensor for next combine, so that the next combine kernel can skip the copying.
 
         Arguments:
             handle: the communication handle given by the `dispatch` function.
 
         Returns:
-            buffer: the raw RDMA low-latency buffer as a BF16 PyTorch tensor with shape
+            buffer: the raw RDMA buffer as a BF16 PyTorch tensor with shape
                 `[num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden]`, you should fill this buffer
                 by yourself.
         """
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
-        return self.runtime.get_next_low_latency_combine_buffer(num_max_dispatch_tokens_per_rank, hidden, num_experts)
+        return self.runtime.get_next_combine_buffer(num_max_dispatch_tokens_per_rank, hidden, num_experts)
 
     def update_memory_buffers(self, num_ranks: int, num_experts_per_rank: int, num_rdma_bytes: int):
         """
@@ -350,8 +348,8 @@ class Buffer:
         """
         self.runtime.remove_ranks(remote_ranks)
 
-    def low_latency_sync(self) -> None:
+    def sync(self) -> None:
         """
         Synchronize all ranks.
         """
-        self.runtime.low_latency_sync()
+        self.runtime.sync()

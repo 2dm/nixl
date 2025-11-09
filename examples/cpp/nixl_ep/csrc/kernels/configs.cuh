@@ -14,8 +14,8 @@
 #define NUM_TIMEOUT_CYCLES 20000000000ull // 20G cycles ~= 10s
 #endif
 
-#define LOW_LATENCY_SEND_PHASE 1
-#define LOW_LATENCY_RECV_PHASE 2
+#define INTERNODE_SEND_PHASE 1
+#define INTERNODE_RECV_PHASE 2
 
 // Make CLion CUDA indexing work
 #ifdef __CLION_IDE__

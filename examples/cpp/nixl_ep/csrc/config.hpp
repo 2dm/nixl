@@ -15,7 +15,7 @@ dtype_t align(dtype_t a, dtype_t b) {
     return ceil_div<dtype_t>(a, b) * b;
 }
 
-struct LowLatencyBuffer {
+struct InternodeBuffer {
     int num_clean_int = 0;
 
     void* dispatch_rdma_send_buffer = nullptr;
@@ -35,16 +35,16 @@ struct LowLatencyBuffer {
     }
 };
 
-struct LowLatencyLayout {
+struct InternodeLayout {
     size_t total_bytes = 0;
-    LowLatencyBuffer buffers[2];
+    InternodeBuffer buffers[2];
 
     template <typename out_ptr_t = void*, typename count_ptr_t = uint8_t*, typename in_ptr_t = void*>
     out_ptr_t advance(const in_ptr_t& ptr, size_t count) {
         return reinterpret_cast<out_ptr_t>(reinterpret_cast<count_ptr_t>(ptr) + count);
     }
 
-    LowLatencyLayout(void* rdma_buffer, int num_max_dispatch_tokens_per_rank, int hidden, int num_ranks, int num_experts) {
+    InternodeLayout(void* rdma_buffer, int num_max_dispatch_tokens_per_rank, int hidden, int num_ranks, int num_experts) {
         const int num_scales = hidden / 128;
 
         // Dispatch and combine layout:
@@ -100,8 +100,8 @@ struct LowLatencyLayout {
     }
 };
 
-size_t get_low_latency_rdma_size_hint(int num_max_dispatch_tokens_per_rank, int hidden, int num_ranks, int num_experts) {
-    auto num_bytes = LowLatencyLayout(nullptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts).total_bytes;
+size_t get_rdma_size_hint(int num_max_dispatch_tokens_per_rank, int hidden, int num_ranks, int num_experts) {
+    auto num_bytes = InternodeLayout(nullptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts).total_bytes;
     return ((num_bytes + NUM_BUFFER_ALIGNMENT_BYTES) / NUM_BUFFER_ALIGNMENT_BYTES) * NUM_BUFFER_ALIGNMENT_BYTES;
 }
 

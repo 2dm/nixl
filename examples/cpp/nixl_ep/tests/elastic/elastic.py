@@ -45,7 +45,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     rank_offset = 128
     assert num_ranks - rank_offset < 257, 'Too many ranks (exceeding test precision limit)'
     
-    # Track masked ranks (like shrink_test in test_low_latency.py)
+    # Track masked ranks (like shrink_test in elastic.py)
     mask_status = torch.zeros((max_num_ranks, ), dtype=torch.int32, device='cuda')
 
     x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * (rank - rank_offset)
@@ -102,13 +102,13 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             
                             cumulative_local_expert_recv_stats = torch.zeros((num_local_experts, ), dtype=torch.int, device='cuda')
                             packed_recv_x, packed_recv_count, handle, event, hook = \
-                                buffer.low_latency_dispatch(current_x, topk_idx, num_tokens, num_experts,
+                                buffer.dispatch(current_x, topk_idx, num_tokens, num_experts,
                                                             use_fp8=dispatch_use_fp8, round_scale=round_scale, use_ue8m0=use_ue8m0,
                                                             cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
                                                             async_finish=not return_recv_hook, return_recv_hook=return_recv_hook)
                             hook() if return_recv_hook else event.current_stream_wait()
                         # Query mask buffer to get current failure status
-                        buffer.low_latency_query_mask_buffer(mask_status)
+                        buffer.query_mask_buffer(mask_status)
                         packed_recv_x = (packed_recv_x[0], packed_recv_x[1].contiguous()) if dispatch_use_fp8 else packed_recv_x
                         simulated_gemm_x = per_token_cast_back(packed_recv_x[0].view(-1, hidden), packed_recv_x[1].view(-1, hidden // 128)).view(packed_recv_x[0].shape) \
                             if dispatch_use_fp8 else packed_recv_x.clone()
@@ -153,15 +153,15 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                         # Check combine correctness
                         for zero_copy in (False, ) if use_logfmt else (False, True):
                             if zero_copy:
-                                buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
+                                buffer.get_next_combine_buffer(handle)[:, :, :] = simulated_gemm_x
                             out = torch.empty((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
-                            combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
+                            combined_x, event, hook = buffer.combine(simulated_gemm_x, topk_idx, topk_weights, handle,
                                                                                 use_logfmt=use_logfmt,
                                                                                 async_finish=not return_recv_hook, zero_copy=zero_copy,
                                                                                 return_recv_hook=return_recv_hook, out=out)
                             hook() if return_recv_hook else event.current_stream_wait()
                             # Query mask buffer again after combine
-                            buffer.low_latency_query_mask_buffer(mask_status)
+                            buffer.query_mask_buffer(mask_status)
                             if do_check:
                                 # Adjust topk_idx for validation: mark selections from masked ranks as -1
                                 owner_by_expert = (torch.arange(num_experts, device='cuda') // num_local_experts)
@@ -185,16 +185,16 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     # noinspection PyShadowingNames
     def test_func(return_recv_hook: bool):
         recv_x, recv_count, handle, event, hook = \
-            buffer.low_latency_dispatch(current_x, topk_idx, num_tokens, num_experts,
+            buffer.dispatch(current_x, topk_idx, num_tokens, num_experts,
                                         cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
                                         use_fp8=True, async_finish=False, return_recv_hook=return_recv_hook)
         large_gemm_with_hook(hook) if return_recv_hook else None
-        combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
+        combined_x, event, hook = buffer.combine(simulated_gemm_x, topk_idx, topk_weights, handle,
                                                              use_logfmt=use_logfmt, return_recv_hook=return_recv_hook)
         large_gemm_with_hook(hook) if return_recv_hook else None
 
     def test_barrier():
-        buffer.low_latency_sync()
+        buffer.sync()
 
     # Calculate bandwidth
     num_fp8_bytes, num_bf16_bytes = (hidden + hidden / 128 * 4 + 16), hidden * 2
@@ -215,7 +215,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         return
 
     for return_recv_hook in (False, True):
-        buffer.low_latency_sync()
+        buffer.sync()
         dispatch_t, combine_t = bench_kineto(partial(test_func, return_recv_hook=return_recv_hook),
                                              kernel_names=('dispatch', 'combine'), barrier_comm_profiling=True,
                                              suppress_kineto_output=False, num_kernels_per_period=2 if return_recv_hook else 1,
@@ -261,11 +261,11 @@ def worker(torch_rank: int, args: argparse.Namespace):
     os.environ['NIXL_ETCD_ENDPOINTS'] = args.etcd_server
 
     # Initialize nixl_ep buffer
-    num_rdma_bytes = nixl_ep.Buffer.get_low_latency_rdma_size_hint(args.num_tokens, args.hidden_dim, max_num_ranks, args.num_experts_per_rank * max_num_ranks)
+    num_rdma_bytes = nixl_ep.Buffer.get_rdma_size_hint(args.num_tokens, args.hidden_dim, max_num_ranks, args.num_experts_per_rank * max_num_ranks)
     if local_rank == 0:
         print(f'Allocating buffer size: {num_rdma_bytes / 1e6} MB ...', flush=True)
 
-    buffer = nixl_ep.Buffer(rank=global_rank, low_latency_nvlink_backend=args.nvlink_backend, explicitly_destroy=True, enable_shrink=True)
+    buffer = nixl_ep.Buffer(rank=global_rank, nvlink_backend=args.nvlink_backend, explicitly_destroy=True, enable_shrink=True)
     buffer.update_memory_buffers(num_ranks=max_num_ranks, num_experts_per_rank=args.num_experts_per_rank, num_rdma_bytes=num_rdma_bytes)
     signal.signal(signal.SIGTERM, partial(handle_sigterm, buffer=buffer, plan=plan, rank_client=rank_client))
     remote_ranks = set()
@@ -306,7 +306,7 @@ def worker(torch_rank: int, args: argparse.Namespace):
         test_main(args.num_tokens, args.hidden_dim, current_num_experts, args.num_topk,
                 global_rank, current_num_ranks, max_num_ranks, buffer, kineto=args.kineto, fault_tolerance_test=kill_rank)
         # Query mask buffer to detect any unexpected rank failures and clean them up
-        buffer.low_latency_query_mask_buffer(mask_status)
+        buffer.query_mask_buffer(mask_status)
         newly_failed_ranks = set()
         for r in range(current_num_ranks):
             if mask_status[r].item() != 0 and r in remote_ranks:

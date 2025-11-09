@@ -57,7 +57,7 @@ struct NixlAgentInfo
     std::vector<bool> wire_up_done; // [num_peers]
 };
 
-struct nixl_low_latency_ctx {
+struct nixl_internode_ctx {
     std::vector<nixlXferReqH *> cpu_remote_counter_reqs_0; // [dest_expert_id,remote_rank], cpu ptrs to nixlXferReqH
     std::vector<nixlXferReqH *> cpu_remote_counter_reqs_1; // [dest_expert_id,remote_rank], cpu ptrs to nixlXferReqH
     std::vector<nixlGpuXferReqH> gpu_remote_counter_reqs_0; // [dest_expert_id,remote_rank], gpu ptrs to nixlGpuXferReqH
@@ -68,13 +68,12 @@ struct nixl_low_latency_ctx {
     std::vector<nixlGpuXferReqH> gpu_sync_counters;
     std::vector<void *> rdma_p2p_ptrs; // [num_ranks]
     std::vector<uint64_t *> counters_p2p_ptrs; // [num_ranks]
-    internode_ll::gpu_nixl_ctx nixl_ctx[2]; // Double buffering
+    internode::gpu_nixl_ctx nixl_ctx[2]; // Double buffering
 };
 
 struct Buffer {
 private:
-    // Low-latency mode buffer
-    int low_latency_buffer_idx = 0;
+    int buffer_idx = 0; // Double buffering index
 
     // RDMA Buffer
     int64_t num_rdma_bytes;
@@ -115,7 +114,7 @@ private:
     uint64_t max_num_ranks;
     int env_num_channels;
     nixl_xfer_dlist_t dummy_src_dlist; // TODO: Remove once NIXL supports null src dlist for signals
-    std::unique_ptr<nixl_low_latency_ctx> low_latency_ctx = nullptr;
+    std::unique_ptr<nixl_internode_ctx> internode_ctx = nullptr;
 
     /* Common private funcs */
     void _nixl_agent_init();
@@ -125,19 +124,19 @@ private:
     void _nixl_agents_peer_info_cleanup(const std::vector<int>& ranks);
     void _nixl_agents_wireup(std::vector<int>& ranks);
 
-    /* Low-latency mode private funcs */
-    void _nixl_ll_init(const std::vector<int>& ranks_to_setup);
-    void _nixl_ll_context_init();
-    void _nixl_ll_counters_prepare(const std::vector<int>& ranks_to_setup);
-    void _nixl_ll_batches_prepare(const std::vector<int>& ranks_to_setup);
-    void _nixl_ll_p2p_ptrs_prepare(const std::vector<int>& ranks_to_setup);
-    void _nixl_ll_gpu_ctx_update();
+    /* NIXL internode private funcs */
+    void _nixl_internode_init(const std::vector<int>& ranks_to_setup);
+    void _nixl_internode_context_init();
+    void _nixl_internode_counters_prepare(const std::vector<int>& ranks_to_setup);
+    void _nixl_internode_batches_prepare(const std::vector<int>& ranks_to_setup);
+    void _nixl_internode_p2p_ptrs_prepare(const std::vector<int>& ranks_to_setup);
+    void _nixl_internode_gpu_ctx_update();
     
-    /* Low-latency mode cleanup funcs */
-    void _nixl_ll_cleanup(const std::vector<int>& ranks_to_remove);
-    void _nixl_ll_counters_cleanup(const std::vector<int>& ranks_to_remove);
-    void _nixl_ll_batches_cleanup(const std::vector<int>& ranks_to_remove);
-    void _nixl_ll_p2p_ptrs_cleanup(const std::vector<int>& ranks_to_remove);
+    /* NIXL internode cleanup funcs */
+    void _nixl_internode_cleanup(const std::vector<int>& ranks_to_remove);
+    void _nixl_internode_counters_cleanup(const std::vector<int>& ranks_to_remove);
+    void _nixl_internode_batches_cleanup(const std::vector<int>& ranks_to_remove);
+    void _nixl_internode_p2p_ptrs_cleanup(const std::vector<int>& ranks_to_remove);
 
 public:
     Buffer(int rank, bool explicitly_destroy, bool enable_shrink);
@@ -162,10 +161,10 @@ public:
 
     void destroy();
 
-    void clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts);
+    void clean_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts);
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
-    low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_idx,
+    dispatch(const torch::Tensor& x, const torch::Tensor& topk_idx,
                          const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
                          const std::optional<torch::Tensor>& dispatch_wait_recv_cost_stats,
                          int num_max_dispatch_tokens_per_rank, int num_experts,
@@ -173,23 +172,23 @@ public:
                          bool async, bool return_recv_hook);
 
     std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
-    low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,
+    combine(const torch::Tensor& x, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,
                         const torch::Tensor& src_info, const torch::Tensor& layout_range,
                         const std::optional<torch::Tensor>& combine_wait_recv_cost_stats,
                         int num_max_dispatch_tokens_per_rank, int num_experts,
                         bool use_logfmt, bool zero_copy, bool async, bool return_recv_hook,
                         const std::optional<torch::Tensor>& out = std::nullopt);
 
-    void low_latency_sync();
+    void sync();
 
     torch::Tensor
-    get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const;
+    get_next_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const;
 
-    void low_latency_update_mask_buffer(int rank_to_mask, bool mask);
+    void update_mask_buffer(int rank_to_mask, bool mask);
 
-    void low_latency_query_mask_buffer(const torch::Tensor& mask_status);
+    void query_mask_buffer(const torch::Tensor& mask_status);
 
-    void low_latency_clean_mask_buffer();
+    void clean_mask_buffer();
 };
 
 } // namespace nixl_ep
