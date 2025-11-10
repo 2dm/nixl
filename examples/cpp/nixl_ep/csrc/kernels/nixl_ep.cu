@@ -27,7 +27,7 @@ namespace cg = cooperative_groups;
 
 namespace nixl_ep {
 
-namespace internode {
+namespace ep_kernels {
 
 template<bool use_warp_sync = false>
 __forceinline__ __device__ bool is_rank_masked(int* mask_buffer_ptr, int rank) {
@@ -56,7 +56,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
          int num_tokens, int num_max_dispatch_tokens_per_rank,
          int num_topk, int num_experts, int rank, int num_ranks,
          int num_warp_groups, int num_warps_per_group,
-         bool round_scale, int phases, internode::gpu_nixl_ctx nixl_ctx) {
+         bool round_scale, int phases, ep_kernels::gpu_nixl_ctx nixl_ctx) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
     const auto warp_id = thread_id / 32, lane_id = get_lane_id();
@@ -90,7 +90,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
 
     // Sending phase
-    if ((phases & INTERNODE_SEND_PHASE) == 0)
+    if ((phases & EP_SEND_PHASE) == 0)
         goto dispatch_RECV;
 
     // There are 2 kinds of warps in this part:
@@ -254,11 +254,11 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
     // Receiving phase
     dispatch_RECV:
-    if ((phases & INTERNODE_RECV_PHASE) == 0)
+    if ((phases & EP_RECV_PHASE) == 0)
         return;
 
     // For send-and-recv kernels, we need a grid sync for making `packed_recv_count` visible
-    if (phases & INTERNODE_SEND_PHASE)
+    if (phases & EP_SEND_PHASE)
         cg::this_grid().sync();
 
     // Receiving and packing
@@ -376,7 +376,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int num_topk, int num_experts, int rank, int num_ranks,
               bool use_fp8, bool round_scale, bool use_ue8m0,
               void* workspace, int num_device_sms,
-              cudaStream_t stream, int phases, internode::gpu_nixl_ctx nixl_ctx) {
+              cudaStream_t stream, int phases, ep_kernels::gpu_nixl_ctx nixl_ctx) {
     constexpr int kNumMaxTopK = 9;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -596,7 +596,7 @@ combine(void* combined_x,
         int num_max_dispatch_tokens_per_rank,
         int num_experts, int rank, int num_ranks,
         int num_warp_groups, int num_warps_per_group,
-        int phases, bool zero_copy, internode::gpu_nixl_ctx nixl_ctx) {
+        int phases, bool zero_copy, ep_kernels::gpu_nixl_ctx nixl_ctx) {
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
     const auto thread_id = static_cast<int>(threadIdx.x);
@@ -630,7 +630,7 @@ combine(void* combined_x,
     EP_STATIC_ASSERT(num_bytes_per_slot % sizeof(int4) == 0, "Invalid vectorization");
 
     // Sending phase
-    if ((phases & INTERNODE_SEND_PHASE) == 0)
+    if ((phases & EP_SEND_PHASE) == 0)
         goto combine_RECV;
 
     // Clean up next buffer
@@ -802,7 +802,7 @@ combine(void* combined_x,
 
     // Receiving phase
     combine_RECV:
-    if ((phases & INTERNODE_RECV_PHASE) == 0)
+    if ((phases & EP_RECV_PHASE) == 0)
         return;
 
     // Wait all ranks to arrive
@@ -993,7 +993,7 @@ void combine(void* combined_x,
              int num_topk, int num_experts, int rank, int num_ranks,
              bool use_logfmt,
              void* workspace, int num_device_sms,
-             cudaStream_t stream, int phases, bool zero_copy, internode::gpu_nixl_ctx nixl_ctx) {
+             cudaStream_t stream, int phases, bool zero_copy, ep_kernels::gpu_nixl_ctx nixl_ctx) {
     constexpr int kNumMaxTopk = 9;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -1103,7 +1103,7 @@ void clean_mask_buffer(int* mask_buffer_ptr, int num_ranks, cudaStream_t stream)
     LAUNCH_KERNEL(&cfg, clean_mask_buffer<kNumThreads>, mask_buffer_ptr, num_ranks);
 }
 
-__global__ static void sync_kernel(internode::gpu_nixl_ctx nixl_ctx) {
+__global__ static void sync_kernel(ep_kernels::gpu_nixl_ctx nixl_ctx) {
     if (threadIdx.x < nixl_ctx.num_ranks && threadIdx.x != nixl_ctx.rank) {
         auto local_counter = nixl_ctx.local_sync_counter_get(threadIdx.x);
         auto remote_counter = nixl_ctx.remote_sync_counter_get(threadIdx.x);
@@ -1122,10 +1122,10 @@ __global__ static void sync_kernel(internode::gpu_nixl_ctx nixl_ctx) {
     }
 }
 
-void sync(internode::gpu_nixl_ctx nixl_ctx, cudaStream_t stream) {
+void sync(ep_kernels::gpu_nixl_ctx nixl_ctx, cudaStream_t stream) {
     SETUP_LAUNCH_CONFIG(1, nixl_ctx.num_ranks, stream);
     LAUNCH_KERNEL(&cfg, sync_kernel, nixl_ctx);
 }
-} // namespace internode
+} // namespace ep_kernels
 
 } // namespace nixl_ep

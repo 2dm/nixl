@@ -74,7 +74,7 @@ struct NixlAgentInfo
     std::vector<bool> wire_up_done; // [num_peers]
 };
 
-struct nixl_internode_ctx {
+struct nixl_ep_ctx {
     std::vector<nixlXferReqH *> cpu_remote_counter_reqs_0; // [dest_expert_id,remote_rank], cpu ptrs to nixlXferReqH
     std::vector<nixlXferReqH *> cpu_remote_counter_reqs_1; // [dest_expert_id,remote_rank], cpu ptrs to nixlXferReqH
     std::vector<nixlGpuXferReqH> gpu_remote_counter_reqs_0; // [dest_expert_id,remote_rank], gpu ptrs to nixlGpuXferReqH
@@ -85,7 +85,7 @@ struct nixl_internode_ctx {
     std::vector<nixlGpuXferReqH> gpu_sync_counters;
     std::vector<void *> rdma_p2p_ptrs; // [num_ranks]
     std::vector<uint64_t *> counters_p2p_ptrs; // [num_ranks]
-    internode::gpu_nixl_ctx nixl_ctx[2]; // Double buffering
+    ep_kernels::gpu_nixl_ctx gpu[2]; // Double buffering
 };
 
 struct Buffer {
@@ -131,7 +131,7 @@ private:
     uint64_t max_num_ranks;
     int env_num_channels;
     nixl_xfer_dlist_t dummy_src_dlist; // TODO: Remove once NIXL supports null src dlist for signals
-    std::unique_ptr<nixl_internode_ctx> internode_ctx = nullptr;
+    std::unique_ptr<nixl_ep_ctx> nixl_ctx = nullptr;
 
     /* Common private funcs */
     void _nixl_agent_init();
@@ -141,19 +141,19 @@ private:
     void _nixl_agents_peer_info_cleanup(const std::vector<int>& ranks);
     void _nixl_agents_wireup(std::vector<int>& ranks);
 
-    /* NIXL internode private funcs */
-    void _nixl_internode_init(const std::vector<int>& ranks_to_setup);
-    void _nixl_internode_context_init();
-    void _nixl_internode_counters_prepare(const std::vector<int>& ranks_to_setup);
-    void _nixl_internode_batches_prepare(const std::vector<int>& ranks_to_setup);
-    void _nixl_internode_p2p_ptrs_prepare(const std::vector<int>& ranks_to_setup);
-    void _nixl_internode_gpu_ctx_update();
+    /* NIXL EP private funcs */
+    void _nixl_ep_init(const std::vector<int>& ranks_to_setup);
+    void _nixl_ep_context_init();
+    void _nixl_ep_counters_prepare(const std::vector<int>& ranks_to_setup);
+    void _nixl_ep_batches_prepare(const std::vector<int>& ranks_to_setup);
+    void _nixl_ep_p2p_ptrs_prepare(const std::vector<int>& ranks_to_setup);
+    void _nixl_ep_gpu_ctx_update();
     
-    /* NIXL internode cleanup funcs */
-    void _nixl_internode_cleanup(const std::vector<int>& ranks_to_remove);
-    void _nixl_internode_counters_cleanup(const std::vector<int>& ranks_to_remove);
-    void _nixl_internode_batches_cleanup(const std::vector<int>& ranks_to_remove);
-    void _nixl_internode_p2p_ptrs_cleanup(const std::vector<int>& ranks_to_remove);
+    /* NIXL EP cleanup funcs */
+    void _nixl_ep_cleanup(const std::vector<int>& ranks_to_remove);
+    void _nixl_ep_counters_cleanup(const std::vector<int>& ranks_to_remove);
+    void _nixl_ep_batches_cleanup(const std::vector<int>& ranks_to_remove);
+    void _nixl_ep_p2p_ptrs_cleanup(const std::vector<int>& ranks_to_remove);
 
 public:
     Buffer(int rank, bool explicitly_destroy, bool enable_shrink);

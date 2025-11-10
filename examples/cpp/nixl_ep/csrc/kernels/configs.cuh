@@ -31,8 +31,8 @@
 #define NUM_TIMEOUT_CYCLES 20000000000ull // 20G cycles ~= 10s
 #endif
 
-#define INTERNODE_SEND_PHASE 1
-#define INTERNODE_RECV_PHASE 2
+#define EP_SEND_PHASE 1
+#define EP_RECV_PHASE 2
 
 // Remove Torch restrictions
 #ifdef __CUDA_NO_HALF_CONVERSIONS__
