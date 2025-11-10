@@ -21,7 +21,7 @@ import torch
 import time
 
 # --- Request handler ---
-class H(StreamRequestHandler):
+class RankServerHandler(StreamRequestHandler):
     _counts = defaultdict(list)  # List of used local ranks per host
     _global = 0
     _lock = Lock()
@@ -84,7 +84,7 @@ class ReusableTCPServer(ThreadingTCPServer):
 # --- Lazy-start server ---
 def start_server(port=9999):
     try:
-        server = ReusableTCPServer(("0.0.0.0", port), H)
+        server = ReusableTCPServer(("0.0.0.0", port), RankServerHandler)
         server.serve_forever()
     except OSError:
         pass  # another process already started the server
