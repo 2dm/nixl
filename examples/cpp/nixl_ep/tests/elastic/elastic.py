@@ -261,16 +261,9 @@ def worker(torch_rank: int, args: argparse.Namespace):
     torch.cuda.set_device(0)
 
     # Initialize UCX
-    pxb_nics_dgx = ["mlx5_0", "mlx5_1", "mlx5_2", "mlx5_3", "mlx5_6", "mlx5_7", "mlx5_8", "mlx5_9"]
-    pxb_nics_eos = ["mlx5_0", "mlx5_3", "mlx5_4", "mlx5_5", "mlx5_6", "mlx5_9", "mlx5_10", "mlx5_11"]
-    tcp_nics_dgx = ',enp226s0'
-    tcp_nics_eos = ',ibp154s0,ibp192s0,ibp206s0,ibp220s0,ibp94s0'
-    if args.platform == "dgx":
-        os.environ['UCX_NET_DEVICES'] = f'cuda0-{pxb_nics_dgx[local_rank]}:1' + tcp_nics_dgx
-    elif args.platform == "eos":
-        os.environ['UCX_NET_DEVICES'] = f'cuda0-{pxb_nics_eos[local_rank]}:1' + tcp_nics_eos
-    else:
-        raise ValueError(f"Invalid platform: {args.platform}")
+    pxb_nics = ["mlx5_0", "mlx5_3", "mlx5_4", "mlx5_5", "mlx5_6", "mlx5_9", "mlx5_10", "mlx5_11"]
+    tcp_nics = ',ibp154s0,ibp192s0,ibp206s0,ibp220s0,ibp94s0'
+    os.environ['UCX_NET_DEVICES'] = f'cuda0-{pxb_nics[local_rank]}:1' + tcp_nics
 
     # Initialize NIXL
     os.environ['NIXL_ETCD_ENDPOINTS'] = args.etcd_server
@@ -351,7 +344,6 @@ def main():
     parser.add_argument("--num-experts-per-rank", type=int, default=2, help="Number of experts per rank")
     parser.add_argument("--hidden-dim", type=int, default=7168, help="Hidden dimension")
     parser.add_argument("--num-topk", type=int, default=8, help="Number of topk")
-    parser.add_argument("--platform", type=str, default="eos", help="Platform")
     parser.add_argument("--etcd-server", type=str, default="http://127.0.0.1:2379", help="ETCD server address for NIXL (default: http://127.0.0.1:2379)")
     parser.add_argument("--rank-server", type=str, help="Rank server address. If not set, a rank server will be started locally and will be killed after all the workers launched in this run are finished.")
     parser.add_argument("--kineto", action="store_true", help="Enable kineto profiling")
