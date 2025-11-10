@@ -34,12 +34,6 @@
 #define INTERNODE_SEND_PHASE 1
 #define INTERNODE_RECV_PHASE 2
 
-// Make CLion CUDA indexing work
-#ifdef __CLION_IDE__
-#define __CUDA_ARCH__ 900 // NOLINT(*-reserved-identifier)
-#define __CUDACC_RDC__ // NOLINT(*-reserved-identifier)
-#endif
-
 // Remove Torch restrictions
 #ifdef __CUDA_NO_HALF_CONVERSIONS__
 #undef __CUDA_NO_HALF_CONVERSIONS__
