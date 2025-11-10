@@ -68,18 +68,6 @@ __device__ __forceinline__ void memory_fence() {
     asm volatile("fence.acq_rel.sys;":: : "memory");
 }
 
-__device__ __forceinline__ void memory_fence_gpu() {
-    asm volatile("fence.acq_rel.gpu;":: : "memory");
-}
-
-__device__ __forceinline__ void memory_fence_cta() {
-    asm volatile("fence.acq_rel.cta;":: : "memory");
-}
-
-__device__  __forceinline__ void st_relaxed_sys_global(const int *ptr, int val) {
-    asm volatile("st.relaxed.sys.global.s32 [%0], %1;"::"l"(ptr), "r"(val) : "memory");
-}
-
 __device__  __forceinline__ void st_release_sys_global(const int *ptr, int val) {
     asm volatile("st.release.sys.global.s32 [%0], %1;"::"l"(ptr), "r"(val) : "memory");
 }
@@ -120,12 +108,6 @@ __device__ __forceinline__ uint64_t ld_acquire_global(const uint64_t *ptr) {
     return ret;
 }
 
-__device__ __forceinline__ int atomic_add_release_sys_global(const int* ptr, int value) {
-    int ret;
-    asm volatile("atom.add.release.sys.global.s32 %0, [%1], %2;" : "=r"(ret) : "l"(ptr), "r"(value));
-    return ret;
-}
-
 __device__ __forceinline__ int atomic_add_release_global(const int* ptr, int value) {
     int ret;
     asm volatile("atom.add.release.gpu.global.s32 %0, [%1], %2;" : "=r"(ret) : "l"(ptr), "r"(value));
@@ -135,72 +117,6 @@ __device__ __forceinline__ int atomic_add_release_global(const int* ptr, int val
 __device__ __forceinline__ int atomic_add_release_global(const uint64_t* ptr, uint64_t value) {
     uint64_t ret;
     asm volatile("atom.add.release.gpu.global.u64 %0, [%1], %2;" : "=l"(ret) : "l"(ptr), "l"(value));
-    return ret;
-}
-
-__device__ __forceinline__ uint64_t atomic_add_release_cta(const uint64_t* ptr, uint64_t value) {
-    uint64_t ret;
-    asm volatile("atom.add.release.cta.u64 %0, [%1], %2;" : "=l"(ret) : "l"(ptr), "l"(value));
-    return ret;
-}
-
-__device__ __forceinline__ int ld_acquire_cta(const int *ptr) {
-    int ret;
-    asm volatile("ld.acquire.cta.s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
-    return ret;
-}
-
-__device__ __forceinline__ int ld_acquire_cta(const volatile int *ptr) {
-    int ret;
-    asm volatile("ld.acquire.cta.s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
-    return ret;
-}
-
-__device__ __forceinline__ uint8_t ld_na_relaxed(const uint8_t *ptr) {
-    uint16_t ret;
-    asm volatile("ld.relaxed.gpu.global.L1::no_allocate.b8 %0, [%1];" : "=h"(ret) : "l"(ptr));
-    return static_cast<uint8_t>(ret);
-}
-
-__device__ __forceinline__ uint16_t ld_na_relaxed(const uint16_t *ptr) {
-    uint16_t ret;
-    asm volatile("ld.relaxed.gpu.global.L1::no_allocate.b16 %0, [%1];" : "=h"(ret) : "l"(ptr));
-    return ret;
-}
-
-__device__ __forceinline__ uint32_t ld_na_relaxed(const uint32_t *ptr) {
-    uint32_t ret;
-    asm volatile("ld.relaxed.gpu.global.L1::no_allocate.b32 %0, [%1];" : "=r"(ret) : "l"(ptr));
-    return ret;
-}
-
-__device__ __forceinline__ uint64_t ld_na_relaxed(const uint64_t *ptr) {
-    uint64_t ret;
-    asm volatile("ld.relaxed.gpu.global.L1::no_allocate.b64 %0, [%1];" : "=l"(ret) : "l"(ptr));
-    return ret;
-}
-
-__device__  __forceinline__ int ld_volatile_global(const int *ptr) {
-    int ret;
-    asm volatile("ld.volatile.global.s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
-    return ret;
-}
-
-__device__  __forceinline__ float ld_volatile_global(const float *ptr) {
-    float ret;
-    asm volatile("ld.volatile.global.f32 %0, [%1];" : "=f"(ret) : "l"(ptr));
-    return ret;
-}
-
-__device__  __forceinline__ int64_t ld_volatile_global(const int64_t *ptr) {
-    int64_t ret;
-    asm volatile("ld.volatile.global.s64 %0, [%1];" : "=l"(ret) : "l"(ptr));
-    return ret;
-}
-
-__device__  __forceinline__ int64_t ld_volatile_global(const uint64_t *ptr) {
-    int64_t ret;
-    asm volatile("ld.volatile.global.u64 %0, [%1];" : "=l"(ret) : "l"(ptr));
     return ret;
 }
 
@@ -259,39 +175,6 @@ __device__  __forceinline__ int4 ld_nc_global(const int4 *ptr) {
     asm volatile(LD_NC_FUNC ".v4.s32 {%0, %1, %2, %3}, [%4];"
             : "=r"(ret.x), "=r"(ret.y), "=r"(ret.z), "=r"(ret.w) : "l"(ptr));
     return ret;
-}
-
-__device__ __forceinline__ void st_na_relaxed(const uint8_t *ptr, uint8_t val) {
-    asm volatile("st.relaxed.gpu.global.L1::no_allocate.b8 [%0], %1;" : : "l"(ptr), "h"(static_cast<uint16_t>(val)));
-}
-
-__device__ __forceinline__ void st_na_relaxed(const uint16_t *ptr, uint16_t val) {
-    asm volatile("st.relaxed.gpu.global.L1::no_allocate.b16 [%0], %1;" : : "l"(ptr), "h"(val));
-}
-
-__device__ __forceinline__ void st_na_relaxed(const uint32_t *ptr, uint32_t val) {
-    asm volatile("st.relaxed.gpu.global.L1::no_allocate.b32 [%0], %1;" : : "l"(ptr), "r"(val));
-}
-
-__device__ __forceinline__ void st_na_relaxed(const int *ptr, int val) {
-    asm volatile("st.relaxed.gpu.global.L1::no_allocate.b32 [%0], %1;" : : "l"(ptr), "r"(val));
-}
-
-__device__ __forceinline__ void st_na_relaxed(const int4 *ptr, int4 val) {
-    asm volatile("st.relaxed.gpu.global.L1::no_allocate.v4.s32 [%0], {%1, %2, %3, %4};"
-            : : "l"(ptr), "r"(val.x), "r"(val.y), "r"(val.z), "r"(val.w));
-}
-
-__device__ __forceinline__ void st_na_release(const int *ptr, int val) {
-    asm volatile("st.release.gpu.global.L1::no_allocate.b32 [%0], %1;" : : "l"(ptr), "r"(val));
-}
-
-__device__ __forceinline__ void st_na_release(const uint32_t *ptr, uint32_t val) {
-    asm volatile("st.release.gpu.global.L1::no_allocate.b32 [%0], %1;" : : "l"(ptr), "r"(val));
-}
-
-__device__ __forceinline__ void st_na_release(const uint64_t *ptr, uint64_t val) {
-    asm volatile("st.release.gpu.global.L1::no_allocate.b64 [%0], %1;" : : "l"(ptr), "l"(val));
 }
 
 // `st.global.L1::no_allocate` will be translated into `ST.E.NA.[width]` in SASS
@@ -518,61 +401,6 @@ __forceinline__ __device__ out_dtype_t extract_required_scale_format(float value
     } else {
         return value;
     }
-}
-
-template <int kNumRanks, bool kSyncOnly = false>
-__forceinline__ __device__ void
-barrier_block(int** barrier_signal_ptrs, int rank) {
-    auto thread_id = static_cast<int>(threadIdx.x);
-
-    // For non-sync-only cases, the memory operations by other threads in the block must be visible to the `sys` scope
-    if constexpr (not kSyncOnly) {
-        memory_fence();
-        __syncthreads();
-    }
-
-    // Add self-ranks, sub other ranks
-    if (thread_id < kNumRanks) {
-        atomicAdd_system(barrier_signal_ptrs[rank] + thread_id, FINISHED_SUM_TAG);
-        atomicSub_system(barrier_signal_ptrs[thread_id] + rank, FINISHED_SUM_TAG);
-    }
-    EP_DEVICE_ASSERT(kNumRanks <= blockDim.x);
-
-    // Check timeout
-    auto start_time = clock64();
-    while (true) {
-        auto value = thread_id < kNumRanks ? ld_volatile_global(barrier_signal_ptrs[rank] + thread_id) : 0;
-        if (__all_sync(0xffffffff, value <= 0))
-            break;
-
-        if (clock64() - start_time > NUM_TIMEOUT_CYCLES and thread_id < kNumRanks) {
-            printf("NIXL_EP timeout check failed: rank = %d, thread = %d, value = %d)\n", rank, thread_id, value);
-            trap();
-        }
-    }
-    __syncthreads();
-}
-
-__forceinline__ __device__ int atomic_cas_cta_acquire(int* addr, int x, int y) {
-    int ret;
-    asm volatile("atom.acquire.cta.shared::cta.cas.b32 %0, [%1], %2, %3;" : "=r"(ret) : "l"(addr), "r"(x), "r"(y) : "memory");
-    return ret;
-}
-
-__forceinline__ __device__ int atomic_exch_cta_release(int* addr, int x) {
-    int ret;
-    asm volatile("atom.release.cta.shared::cta.exch.b32 %0, [%1], %2;" : "=r"(ret) : "l"(addr), "r"(x) : "memory");
-    return ret;
-}
-
-__forceinline__ __device__ void acquire_lock(int* mutex) {
-    // To make later memory operations valid, we must use `acquire` for memory semantics
-    while (atomic_cas_cta_acquire(mutex, 0, 1) != 0);
-}
-
-__forceinline__ __device__ void release_lock(int* mutex) {
-    // To make previous memory operations visible to other threads, we must use `release` for memory semantics
-    atomic_exch_cta_release(mutex, 0);
 }
 
 // Operation functors
