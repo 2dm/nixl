@@ -142,18 +142,18 @@ private:
     void _nixl_agents_wireup(std::vector<int>& ranks);
 
     /* NIXL EP private funcs */
-    void _nixl_ep_init(const std::vector<int>& ranks_to_setup);
+    void _nixl_ep_init(const std::vector<int>& ranks);
     void _nixl_ep_context_init();
-    void _nixl_ep_counters_prepare(const std::vector<int>& ranks_to_setup);
-    void _nixl_ep_batches_prepare(const std::vector<int>& ranks_to_setup);
-    void _nixl_ep_p2p_ptrs_prepare(const std::vector<int>& ranks_to_setup);
+    void _nixl_ep_counters_prepare(const std::vector<int>& ranks);
+    void _nixl_ep_batches_prepare(const std::vector<int>& ranks);
+    void _nixl_ep_p2p_ptrs_prepare(const std::vector<int>& ranks);
     void _nixl_ep_gpu_ctx_update();
     
     /* NIXL EP cleanup funcs */
-    void _nixl_ep_cleanup(const std::vector<int>& ranks_to_remove);
-    void _nixl_ep_counters_cleanup(const std::vector<int>& ranks_to_remove);
-    void _nixl_ep_batches_cleanup(const std::vector<int>& ranks_to_remove);
-    void _nixl_ep_p2p_ptrs_cleanup(const std::vector<int>& ranks_to_remove);
+    void _nixl_ep_cleanup(const std::vector<int>& ranks);
+    void _nixl_ep_counters_cleanup(const std::vector<int>& ranks);
+    void _nixl_ep_batches_cleanup(const std::vector<int>& ranks);
+    void _nixl_ep_p2p_ptrs_cleanup(const std::vector<int>& ranks);
 
 public:
     Buffer(int rank, bool explicitly_destroy, bool enable_shrink);
@@ -162,7 +162,7 @@ public:
 
     void connect_ranks(const std::vector<int>& remote_ranks_list);
 
-    void remove_ranks(const std::vector<int>& remote_ranks_list);
+    void disconnect_ranks(const std::vector<int>& remote_ranks_list);
 
     void init(int num_ranks, int64_t num_rdma_bytes);
 

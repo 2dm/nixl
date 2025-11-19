@@ -302,7 +302,7 @@ def worker(torch_rank: int, args: argparse.Namespace):
         
         if len(cleanly_removed) > 0:
             print(f"global_rank={global_rank}, local_rank={local_rank} -> removing connections to {cleanly_removed}", flush=True)
-            buffer.remove_ranks(cleanly_removed)
+            buffer.disconnect_ranks(cleanly_removed)
             remote_ranks.difference_update(cleanly_removed)
             time.sleep(5) # required to avoid race between MD invalidation and readdition of same ranks, if this is part of the test
 
@@ -323,7 +323,7 @@ def worker(torch_rank: int, args: argparse.Namespace):
         if len(newly_failed_ranks) > 0:
             print(f"global_rank={global_rank}, local_rank={local_rank} -> detected unexpected rank failures: {newly_failed_ranks}, cleaning up...", flush=True)
             remote_ranks.difference_update(newly_failed_ranks)
-            buffer.remove_ranks(list(newly_failed_ranks))
+            buffer.disconnect_ranks(list(newly_failed_ranks))
             time.sleep(5)
 
         print(f"global_rank={global_rank}, local_rank={local_rank} -> end phase {plan.get_phase()}", flush=True)

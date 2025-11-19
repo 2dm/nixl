@@ -356,7 +356,7 @@ void Buffer::connect_ranks(const std::vector<int>& remote_ranks_list) {
     available = true;
 }
 
-void Buffer::remove_ranks(const std::vector<int>& remote_ranks_list) {
+void Buffer::disconnect_ranks(const std::vector<int>& remote_ranks_list) {
     EP_HOST_ASSERT(!remote_ranks_list.empty());
     EP_HOST_ASSERT(remote_ranks_list.size() <= remote_ranks.size());
     
@@ -731,11 +731,11 @@ void Buffer::_nixl_ep_context_init() {
     nixl_ctx->counters_p2p_ptrs.resize(max_num_ranks);
 }
 
-void Buffer::_nixl_ep_init(const std::vector<int>& ranks_to_setup) {
+void Buffer::_nixl_ep_init(const std::vector<int>& ranks) {
     EP_EXECUTE_ONCE(_nixl_ep_context_init());
-    _nixl_ep_counters_prepare(ranks_to_setup);
-    _nixl_ep_batches_prepare(ranks_to_setup);
-    _nixl_ep_p2p_ptrs_prepare(ranks_to_setup);
+    _nixl_ep_counters_prepare(ranks);
+    _nixl_ep_batches_prepare(ranks);
+    _nixl_ep_p2p_ptrs_prepare(ranks);
     _nixl_ep_gpu_ctx_update();
 }
 
@@ -797,11 +797,11 @@ void Buffer::_nixl_agent_init() {
     }
 }
 
-void Buffer::_nixl_ep_batches_prepare(const std::vector<int>& ranks_to_setup) {
+void Buffer::_nixl_ep_batches_prepare(const std::vector<int>& ranks) {
     nixl_status_t status;
 
     for (int i = 0; i < env_num_channels; ++i) {
-        for (int j : ranks_to_setup) {
+        for (int j : ranks) {
             if (j == rank) continue; // Skip self
             if (nixl_ctx->gpu_batch_reqs[i][j]) continue; // Skip if already exported
             nixl_xfer_dlist_t src_vram(VRAM_SEG);
@@ -818,8 +818,8 @@ void Buffer::_nixl_ep_batches_prepare(const std::vector<int>& ranks_to_setup) {
     }
 }
 
-void Buffer::_nixl_ep_p2p_ptrs_prepare(const std::vector<int>& ranks_to_setup) {
-    for (int i : ranks_to_setup) {
+void Buffer::_nixl_ep_p2p_ptrs_prepare(const std::vector<int>& ranks) {
+    for (int i : ranks) {
         if (i == rank) {
             nixl_ctx->rdma_p2p_ptrs[i] = rdma_buffer_ptr;
             nixl_ctx->counters_p2p_ptrs[i] = counters_buffer_ptr;
@@ -835,11 +835,11 @@ void Buffer::_nixl_ep_p2p_ptrs_prepare(const std::vector<int>& ranks_to_setup) {
     }
 }
 
-void Buffer::_nixl_ep_counters_prepare(const std::vector<int>& ranks_to_setup) {
+void Buffer::_nixl_ep_counters_prepare(const std::vector<int>& ranks) {
     int num_local_experts = env_num_channels;
 
     for (int expert_idx = 0; expert_idx < num_local_experts; expert_idx++) {
-        for (int remote_rank : ranks_to_setup) {
+        for (int remote_rank : ranks) {
             if (remote_rank == rank)
                 continue;
 
@@ -873,7 +873,7 @@ void Buffer::_nixl_ep_counters_prepare(const std::vector<int>& ranks_to_setup) {
     // Initialize sync counters
     uint64_t sync_counter_offset = num_local_experts * max_num_ranks * 2;
 
-    for (int remote_rank : ranks_to_setup) {
+    for (int remote_rank : ranks) {
         if (remote_rank == rank) continue;
         nixl_opt_args_t eparams = {};
         eparams.backends.push_back(nixl_agent_info->backend);
@@ -907,18 +907,18 @@ void Buffer::_nixl_agents_peer_info_cleanup(const std::vector<int>& ranks) {
     }
 }
 
-void Buffer::_nixl_ep_cleanup(const std::vector<int>& ranks_to_remove) {
-    _nixl_ep_p2p_ptrs_cleanup(ranks_to_remove);
-    _nixl_ep_batches_cleanup(ranks_to_remove);
-    _nixl_ep_counters_cleanup(ranks_to_remove);
+void Buffer::_nixl_ep_cleanup(const std::vector<int>& ranks) {
+    _nixl_ep_p2p_ptrs_cleanup(ranks);
+    _nixl_ep_batches_cleanup(ranks);
+    _nixl_ep_counters_cleanup(ranks);
     _nixl_ep_gpu_ctx_update();
 }
 
-void Buffer::_nixl_ep_counters_cleanup(const std::vector<int>& ranks_to_remove) {
+void Buffer::_nixl_ep_counters_cleanup(const std::vector<int>& ranks) {
     int num_local_experts = env_num_channels; 
     
     for (int expert_idx = 0; expert_idx < num_local_experts; expert_idx++) {
-        for (int remote_rank : ranks_to_remove) {
+        for (int remote_rank : ranks) {
             EP_HOST_ASSERT(remote_rank != rank);
             
             int local_counter_idx = expert_idx * max_num_ranks + remote_rank;
@@ -946,7 +946,7 @@ void Buffer::_nixl_ep_counters_cleanup(const std::vector<int>& ranks_to_remove) 
     }
     
     // Clean up sync counters
-    for (int remote_rank : ranks_to_remove) {
+    for (int remote_rank : ranks) {
         if (remote_rank == rank) continue;
         if (nixl_ctx->cpu_sync_counters[remote_rank] != nullptr) {
 #ifndef EP_REMOVE_ONCE
@@ -959,9 +959,9 @@ void Buffer::_nixl_ep_counters_cleanup(const std::vector<int>& ranks_to_remove) 
     }
 }
 
-void Buffer::_nixl_ep_batches_cleanup(const std::vector<int>& ranks_to_remove) {
+void Buffer::_nixl_ep_batches_cleanup(const std::vector<int>& ranks) {
     for (int channel = 0; channel < env_num_channels; ++channel) {
-        for (int remote_rank : ranks_to_remove) {
+        for (int remote_rank : ranks) {
             if (remote_rank == rank) continue;
             
             // Clean up cpu_batch_reqs and gpu_batch_reqs
@@ -990,8 +990,8 @@ void Buffer::_nixl_ep_batches_cleanup(const std::vector<int>& ranks_to_remove) {
     }
 }
 
-void Buffer::_nixl_ep_p2p_ptrs_cleanup(const std::vector<int>& ranks_to_remove) {
-    for (int remote_rank : ranks_to_remove) {
+void Buffer::_nixl_ep_p2p_ptrs_cleanup(const std::vector<int>& ranks) {
+    for (int remote_rank : ranks) {
         EP_HOST_ASSERT(remote_rank < num_ranks);
         // Close P2P memory mappings if they exist
         if (nixl_ctx->rdma_p2p_ptrs[remote_rank] != nullptr && 
@@ -1023,7 +1023,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("update_memory_buffers", &nixl_ep::Buffer::update_memory_buffers)
         .def("sync", &nixl_ep::Buffer::sync)
         .def("connect_ranks", &nixl_ep::Buffer::connect_ranks, py::arg("remote_ranks"))
-        .def("remove_ranks", &nixl_ep::Buffer::remove_ranks)
+        .def("disconnect_ranks", &nixl_ep::Buffer::disconnect_ranks)
         .def("is_available", &nixl_ep::Buffer::is_available)
         .def("get_local_device_id", &nixl_ep::Buffer::get_local_device_id)
         .def("get_local_buffer_tensor", &nixl_ep::Buffer::get_local_buffer_tensor)

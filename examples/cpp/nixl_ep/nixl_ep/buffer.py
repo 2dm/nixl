@@ -351,7 +351,7 @@ class Buffer:
         """
         self.runtime.connect_ranks(remote_ranks)
 
-    def remove_ranks(self, remote_ranks: List[int]) -> None:
+    def disconnect_ranks(self, remote_ranks: List[int]) -> None:
         """
         Remove connections to remote ranks.
 
@@ -359,7 +359,7 @@ class Buffer:
             remote_ranks: List of remote rank IDs to remove connections from.
                          These ranks must be at the end of the current remote_ranks list.
         """
-        self.runtime.remove_ranks(remote_ranks)
+        self.runtime.disconnect_ranks(remote_ranks)
 
     def sync(self) -> None:
         """
