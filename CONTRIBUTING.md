@@ -169,8 +169,7 @@ All code must adhere to the style guide in `docs/CodeStyle.md` and be formatted 
 
 Contributions to the code under `./examples/cpp/nixl_ep` (which is derived
 from DeepEP and licensed under the MIT License) must be licensed under Apache
-2.0 and require the contributor to sign a Contributor License Agreement (CLA)
-before submission.
+2.0.
 
 Contributions that fix documentation errors or that make small changes
 to existing code can be contributed directly by following the rules
