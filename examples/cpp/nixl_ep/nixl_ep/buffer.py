@@ -363,8 +363,9 @@ class Buffer:
         """
         self.runtime.disconnect_ranks(remote_ranks)
 
-    def sync(self) -> None:
+    def barrier(self) -> None:
         """
-        Synchronize all ranks.
+        barrier for all active ranks.
+        notice that this barrier does not flush the network QPs as it is currently doesn't have any use-case that requires it
         """
-        self.runtime.sync()
+        self.runtime.barrier()

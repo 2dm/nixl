@@ -1105,28 +1105,46 @@ void clean_mask_buffer(int* mask_buffer_ptr, int num_ranks, cudaStream_t stream)
     LAUNCH_KERNEL(&cfg, clean_mask_buffer<kNumThreads>, mask_buffer_ptr, num_ranks);
 }
 
-__global__ static void sync_kernel(ep_kernels::gpu_nixl_ctx nixl_ctx) {
-    if (threadIdx.x < nixl_ctx.num_ranks && threadIdx.x != nixl_ctx.rank) {
-        auto local_counter = nixl_ctx.local_sync_counter_get(threadIdx.x);
-        auto remote_counter = nixl_ctx.remote_sync_counter_get(threadIdx.x);
+template <int kNumThreads>
+__forceinline__ __global__ void barrier(int thread_id, int rank, int num_ranks, 
+                                        int* mask_buffer_ptr, int* sync_buffer_ptr, ep_kernels::gpu_nixl_ctx nixl_ctx) {
+    EP_DEVICE_ASSERT(kNumThreads >= num_ranks);
+    if (thread_id == 0) atomicAdd(sync_buffer_ptr + rank, -1);
+    __syncthreads();
 
-        /* Rank is not initialized yet */
-        if (remote_counter == nullptr)
-            return;
+    int cnt = sync_buffer_ptr[rank];
+    if (thread_id < num_ranks && thread_id != rank) {
+        const auto dst_rank = thread_id;
+        const auto dst_ptr = reinterpret_cast<uint64_t>(sync_buffer_ptr + rank);
+        if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
+            if (rank != dst_rank) {
+                nixlGpuXferReqH barrier_req = nixl_ctx.remote_barrier_get(0, dst_rank); 
+                nixlGpuPostSingleWriteXferReq<nixl_gpu_level_t::THREAD>(barrier_req, 0, rank*sizeof(int), dst_rank*sizeof(int), sizeof(int), 0);
+            } else {
+                st_release_sys_global(reinterpret_cast<int*>(dst_ptr), cnt);
+            }
 
-        // write atomic to remote rank
-        EP_DEVICE_ASSERT(nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(remote_counter, 0, 1, 0) == NIXL_IN_PROG); 
-
-        // wait for atomic from remote rank
-        while (ld_acquire_sys_global(local_counter) == 0);
-
-        *local_counter = 0;
+            auto start_time = clock64();
+            uint64_t wait_recv_cost = 0;
+            while (ld_acquire_sys_global(reinterpret_cast<int*>(dst_ptr)) != cnt   // remote is not ready
+                   && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES               // not timeout
+            );
+            // Mask rank if timeout
+            if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
+                printf("Warning: NixlEP timeout for barrier, rank %d, dst_rank %d, expected value %d, actual value %d\n", rank, dst_rank, cnt, ld_acquire_global(sync_buffer_ptr + dst_rank));
+                if (mask_buffer_ptr == nullptr)
+                    trap();
+                atomicExch(mask_buffer_ptr + dst_rank, 1);
+            }
+        }
     }
+    __syncthreads();
 }
 
-void sync(ep_kernels::gpu_nixl_ctx nixl_ctx, cudaStream_t stream) {
-    SETUP_LAUNCH_CONFIG(1, nixl_ctx.num_ranks, stream);
-    LAUNCH_KERNEL(&cfg, sync_kernel, nixl_ctx);
+void barrier(ep_kernels::gpu_nixl_ctx nixl_ctx, int* mask_buffer_ptr, int* sync_buffer_ptr, cudaStream_t stream) {
+    constexpr int kNumThreads = 32;
+    SETUP_LAUNCH_CONFIG(1, kNumThreads, stream);
+    LAUNCH_KERNEL(&cfg, barrier<kNumThreads>, 0, nixl_ctx.rank, nixl_ctx.num_ranks, mask_buffer_ptr, sync_buffer_ptr, nixl_ctx);
 }
 } // namespace ep_kernels
 

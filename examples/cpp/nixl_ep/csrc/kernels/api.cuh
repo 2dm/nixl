@@ -33,8 +33,8 @@ struct gpu_nixl_ctx {
     uint64_t *clean_counters; // Counters to be cleaned for the next iteration
     nixlGpuXferReqH *remote_counter_reqs; // [local_expert_id,dest_rank]
     nixlGpuXferReqH *batch_reqs; // [local_expert_id,dest_rank]
-    uint64_t *local_sync_counters; // [src_rank]
-    nixlGpuXferReqH *remote_sync_counters; // [dest_rank]
+    int *local_barrier_buffer; // [src_rank]
+    nixlGpuXferReqH *remote_barrier_reqs; // [local_expert_idx,dest_rank]
     void **rdma_p2p_ptrs; // [num_ranks]
     uint64_t **counters_p2p_ptrs; // [num_ranks]
     void *rdma_buffer_ptr;
@@ -66,12 +66,12 @@ struct gpu_nixl_ctx {
         return remote_counter_reqs[local_expert_idx * num_ranks + dest_rank];
     }
 
-    __device__ inline nixlGpuXferReqH remote_sync_counter_get(int dest_rank) {
-        return remote_sync_counters[dest_rank];
+    __device__ inline nixlGpuXferReqH remote_barrier_get(int local_expert_idx, int dest_rank) {
+        return remote_barrier_reqs[local_expert_idx * num_ranks + dest_rank];
     }
 
-    __device__ inline uint64_t *local_sync_counter_get(int src_rank) {
-        return &local_sync_counters[src_rank];
+    __device__ inline int* local_barrier_buffer_get(int src_rank) {
+        return &local_barrier_buffer[src_rank];
     }
 
     __device__ inline nixlGpuXferReqH batch_get(int local_expert_idx, int dest_rank) {
@@ -124,7 +124,7 @@ void combine(void* combined_x,
              void* workspace, int num_device_sms,
              cudaStream_t stream, int phases, bool zero_copy, ep_kernels::gpu_nixl_ctx nixl_ctx);
 
-void sync(ep_kernels::gpu_nixl_ctx nixl_ctx, cudaStream_t stream);
+void barrier(ep_kernels::gpu_nixl_ctx nixl_ctx, int* mask_buffer_ptr, int* sync_buffer_ptr, cudaStream_t stream);
 
 void query_mask_buffer(int* mask_buffer_ptr, int num_ranks, int* output_mask_tensor, cudaStream_t stream);
 

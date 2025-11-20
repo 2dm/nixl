@@ -211,7 +211,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         large_gemm_with_hook(hook) if return_recv_hook else None
 
     def test_barrier():
-        buffer.sync()
+        buffer.barrier()
 
     # Calculate bandwidth
     num_fp8_bytes, num_bf16_bytes = (hidden + hidden / 128 * 4 + 16), hidden * 2
@@ -232,7 +232,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         return
 
     for return_recv_hook in (False, True):
-        buffer.sync()
+        buffer.barrier()
         dispatch_t, combine_t = bench_kineto(partial(test_func, return_recv_hook=return_recv_hook),
                                              kernel_names=('dispatch', 'combine'), barrier_comm_profiling=True,
                                              suppress_kineto_output=False, num_kernels_per_period=2 if return_recv_hook else 1,

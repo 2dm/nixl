@@ -59,6 +59,7 @@ struct NixlPeerInfo {
     uint64_t *wireup_ptr;
     cudaIpcMemHandle_t rdma_ipc_handle;
     cudaIpcMemHandle_t counters_ipc_handle;
+    int* sync_buffer_ptr;
     int device_id;
     int rank;
 };
@@ -67,10 +68,12 @@ struct NixlAgentInfo
 {
     NixlAgentInfo(std::shared_ptr<nixlAgent> agent, nixlBackendH* backend, int max_num_ranks): agent(agent), backend(backend) {
         wire_up_done.resize(max_num_ranks, false);
+        remote_agent_names.resize(max_num_ranks);
     }
 
     std::shared_ptr<nixlAgent> agent;
     std::string agent_name;
+    std::vector<std::string> remote_agent_names;
     nixl_opt_args_t extra_params;
     nixlBackendH* backend;
     std::vector<bool> wire_up_done; // [num_peers]
@@ -83,8 +86,9 @@ struct nixl_ep_ctx {
     std::vector<nixlGpuXferReqH> gpu_remote_counter_reqs_1; // [dest_expert_id,remote_rank], gpu ptrs to nixlGpuXferReqH
     std::vector<std::vector<nixlXferReqH*>> cpu_batch_reqs; // [num_local_experts][num_peers]
     std::vector<std::vector<nixlGpuXferReqH>> gpu_batch_reqs; // [num_local_experts][num_peers]
-    std::vector<nixlXferReqH *> cpu_sync_counters;
-    std::vector<nixlGpuXferReqH> gpu_sync_counters;
+    std::vector<std::vector<nixlXferReqH*>> cpu_barrier_reqs;
+    std::vector<std::vector<nixlGpuXferReqH>> gpu_barrier_reqs;
+
     std::vector<void *> rdma_p2p_ptrs; // [num_ranks]
     std::vector<uint64_t *> counters_p2p_ptrs; // [num_ranks]
     ep_kernels::gpu_nixl_ctx gpu[2]; // Double buffering
@@ -152,10 +156,11 @@ private:
     void _nixl_ep_gpu_ctx_update();
     
     /* NIXL EP cleanup funcs */
-    void _nixl_ep_cleanup(const std::vector<int>& ranks);
-    void _nixl_ep_counters_cleanup(const std::vector<int>& ranks);
-    void _nixl_ep_batches_cleanup(const std::vector<int>& ranks);
-    void _nixl_ep_p2p_ptrs_cleanup(const std::vector<int>& ranks);
+    void _nixl_ep_cleanup(const std::vector<int>& ranks_to_remove);
+    void _nixl_ep_counters_cleanup(const std::vector<int>& ranks_to_remove);
+    void _nixl_ep_batches_cleanup(const std::vector<int>& ranks_to_remove);
+    void _nixl_ep_p2p_ptrs_cleanup(const std::vector<int>& ranks_to_remove);
+    void _nixl_ep_barrier_buffer_clear();
 
 public:
     Buffer(int rank, bool explicitly_destroy, bool enable_shrink);
@@ -198,7 +203,7 @@ public:
                         bool use_logfmt, bool zero_copy, bool async, bool return_recv_hook,
                         const std::optional<torch::Tensor>& out = std::nullopt);
 
-    void sync();
+    void barrier();
 
     torch::Tensor
     get_next_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const;
