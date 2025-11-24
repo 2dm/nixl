@@ -81,6 +81,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
     scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
     topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=True)[1]
+    topk_idx = topk_idx.to(nixl_ep.topk_idx_t)
     topk_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda').abs()
 
     # Randomly mask some positions
@@ -95,6 +96,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         r_random = random.Random(seed + r)
         r_scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
         r_topk_idx = torch.topk(r_scores, num_topk, dim=-1, largest=True, sorted=True)[1]
+        r_topk_idx = r_topk_idx.to(nixl_ep.topk_idx_t)
         # Apply same random masking
         for i in range(10):
             r_topk_idx[r_random.randint(0, num_tokens - 1), r_random.randint(0, num_topk - 1)] = -1
@@ -185,7 +187,9 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                 fail_owner_mask = (mask_status!=0).index_select(0, owner_by_expert)
                                 valid_topk_idx = topk_idx >= 0
                                 failed_topk_idx = torch.zeros_like(topk_idx, device='cuda', dtype=torch.bool)
-                                failed_topk_idx[valid_topk_idx] = fail_owner_mask.index_select(0, topk_idx[valid_topk_idx])
+                                failed_topk_idx[valid_topk_idx] = fail_owner_mask.index_select(
+                                    0, topk_idx[valid_topk_idx].to(torch.int64)
+                                )
                                 topk_idx[failed_topk_idx] = -1
                                 diff = calc_diff(current_x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1), combined_x)
                                 assert torch.isnan(combined_x).sum().item() == 0

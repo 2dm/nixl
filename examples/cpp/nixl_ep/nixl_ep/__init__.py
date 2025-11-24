@@ -19,6 +19,7 @@ import torch
 
 from .utils import EventOverlap
 from .buffer import Buffer
-
+from . import nixl_ep_cpp as _nixl_ep_cpp
+topk_idx_t = getattr(_nixl_ep_cpp, "topk_idx_t", torch.int64)
 # noinspection PyUnresolvedReferences
 import os
