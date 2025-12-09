@@ -6,24 +6,16 @@
 #include "exception.cuh"
 #include "launch.cuh"
 #include "utils.cuh"
-#ifdef NIXL_DEEPEP
 #include "api.cuh"
 #include "nixl_device.cuh"
 #include <net/if.h>
 #include <cstdio>
 #include "log.cuh"
-#else
-#include "ibgda_device.cuh"
-#endif
 #include <cstdint>
 
 namespace nixl_ep {
 
 namespace internode {
-
-#ifndef NIXL_DEEPEP
-extern nvshmem_team_t cpu_rdma_team;
-#endif
 
 struct SourceMeta {
     int src_rdma_rank, is_token_in_nvl_rank_bits;
@@ -86,12 +78,6 @@ __forceinline__ __device__ int translate_dst_rdma_rank(const int dst_rdma_rank, 
     return kLowLatencyMode ? (dst_rdma_rank * NUM_MAX_NVL_PEERS + nvl_rank) : dst_rdma_rank;
 }
 
-#ifndef NIXL_DEEPEP
-template <bool kLowLatencyMode>
-__forceinline__ __device__ void nvshmem_sync_with_same_gpu_idx(const nvshmem_team_t& rdma_team) {
-    kLowLatencyMode ? void(nvshmem_sync(rdma_team)) : nvshmem_sync_all();
-}
-#else
 __forceinline__ __device__ void nixl_barrier(internode::gpu_nixl_ctx nixl_ctx, bool use_all_channels = false) {
     int rdma_rank = nixl_ctx.rank / NUM_MAX_NVL_PEERS;
     uint64_t poll_counter = 0;
@@ -121,7 +107,6 @@ __forceinline__ __device__ void nixl_barrier(internode::gpu_nixl_ctx nixl_ctx, b
     st_release_sys_global(nixl_ctx.last_barrier_counter, expected_counter);
     DEVICE_LOG_DEBUG("rank %d nixl_barrier last_barrier_counter: %ld, local_barrier_counter: %ld", nixl_ctx.rank, ld_acquire_sys_global(nixl_ctx.last_barrier_counter), ld_acquire_sys_global(nixl_ctx.local_barrier_counter_ptr));
 }
-#endif
 
 template <bool kLowLatencyMode, int kNumRDMARanks>
 __global__ void
@@ -134,20 +119,14 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
                 int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
                 int* gbl_channel_prefix_matrix, int* recv_gbl_rank_prefix_sum,
                 void* rdma_buffer_ptr,
-#ifndef NIXL_DEEPEP
-                void** buffer_ptrs, int** barrier_signal_ptrs, int rank, const nvshmem_team_t rdma_team) {
-#else
                 void** buffer_ptrs, int** barrier_signal_ptrs, int rank, internode::gpu_nixl_ctx nixl_ctx) {
-#endif
     auto sm_id = static_cast<int>(blockIdx.x);
     auto thread_id = static_cast<int>(threadIdx.x), warp_id = thread_id / 32, lane_id = get_lane_id();
     auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / 32;
 
     auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
     auto num_rdma_experts = num_experts / kNumRDMARanks, num_nvl_experts = num_rdma_experts / NUM_MAX_NVL_PEERS;
-#ifdef NIXL_DEEPEP
     uint64_t initial_rdma_buffer_ptr = reinterpret_cast<uint64_t>(rdma_buffer_ptr);
-#endif
     DEVICE_LOG_DEBUG_LANE_SYNC(0,"notify_dispatch rank: %d, sm_id: %d, num_channels: %d, warp_id: %d, lane_id: %d", rank, sm_id, num_channels, warp_id, lane_id);
     nixlGpuXferReqH* data_requests_handles = nixl_ctx.data_request_handles;
     if (sm_id == 0) {
@@ -156,26 +135,12 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         EP_DEVICE_ASSERT(num_warps > 1);
         EP_DEVICE_ASSERT(kNumRDMARanks <= num_threads);
 
-#ifndef NIXL_DEEPEP
-        // waiting for all previous inflight wrs to complete,
-        // in case of rewriting cleared rdma_buffer
-        auto qps_per_rdma_rank = ibgda_get_state()->num_rc_per_pe * ibgda_get_state()->num_devices_initialized;
-        for (int i = thread_id; i < qps_per_rdma_rank * (kNumRDMARanks - 1); i += num_threads) {
-            auto dst_rdma_rank = (i / qps_per_rdma_rank + rdma_rank + 1) % kNumRDMARanks;
-            auto qp_id = i % qps_per_rdma_rank;
-            nvshmemi_ibgda_quiet(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), qp_id);
-        }
-#endif
         __syncthreads();
 
 
         if (thread_id == 32) {
-#ifdef NIXL_DEEPEP
             DEVICE_LOG_DEBUG("rank %d notify_dispatch calling nixl_barrier 1", rank);
             nixl_barrier(nixl_ctx, true);
-#else
-            nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
-#endif
         }
         barrier_block<NUM_MAX_NVL_PEERS, true>(barrier_signal_ptrs, nvl_rank);
 
@@ -189,7 +154,6 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         for (int i = thread_id; i < rdma_num_int_clean; i += num_threads)
             rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
 
-#ifdef NIXL_DEEPEP
         EP_DEVICE_ASSERT(num_threads >= kNumRDMARanks);
         // With unified context, counters are indexed by [channel_id * num_rdma_ranks + rdma_rank]
         for (int i = 0; i < num_channels; ++ i) {
@@ -198,7 +162,6 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
                 *nixl_ctx.local_tail_counter_get(i, thread_id) = 0;
             }
         }
-#endif
 
         // Copy to send buffer
         #pragma unroll
@@ -219,21 +182,12 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         // TODO: overlap EP barrier and NVL cleaning
         for (int i = warp_id; i < kNumRDMARanks; i += num_warps) {
             if (i != rdma_rank) {
-#ifdef NIXL_DEEPEP
-                // __shared__ nixlGpuXferStatusH request_status;
                 size_t src_offset = reinterpret_cast<uint64_t>(rdma_recv_num_tokens_mixed.send_buffer(i)) - reinterpret_cast<uint64_t>(initial_rdma_buffer_ptr);
                 size_t dst_offset = reinterpret_cast<uint64_t>(rdma_recv_num_tokens_mixed.recv_buffer(rdma_rank)) - reinterpret_cast<uint64_t>(initial_rdma_buffer_ptr);
                 unsigned int dlist_idx = 0;
                 size_t msg_size = (NUM_MAX_NVL_PEERS + num_rdma_experts + 1) * sizeof(int);
                 nixl_status_t status = nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::WARP>(data_requests_handles[i], 1, &dlist_idx, &msg_size, &src_offset, &dst_offset, 0, 0, 0);
                 EP_DEVICE_ASSERT(status == NIXL_IN_PROG);
-                // poll_request_status<NIXL_GPU_XFER_COORDINATION_WARP>(&request_status,rank);
-#else
-                nvshmemi_ibgda_put_nbi_warp<true>(reinterpret_cast<uint64_t>(rdma_recv_num_tokens_mixed.recv_buffer(rdma_rank)),
-                                                reinterpret_cast<uint64_t>(rdma_recv_num_tokens_mixed.send_buffer(i)),
-                                                (NUM_MAX_NVL_PEERS + num_rdma_experts + 1) * sizeof(int),
-                                                translate_dst_rdma_rank<kLowLatencyMode>(i, nvl_rank), 0, lane_id, 0);
-#endif
             } else { 
                 UNROLLED_WARP_COPY(1, lane_id, NUM_MAX_NVL_PEERS + num_rdma_experts + 1, 
                                    rdma_recv_num_tokens_mixed.recv_buffer(rdma_rank),
@@ -243,21 +197,12 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         }
         __syncthreads();
 
-        // Wait previous operations to be finished
-#ifndef NIXL_DEEPEP
-        if (thread_id < kNumRDMARanks and thread_id != rdma_rank)
-            nvshmemi_ibgda_quiet(translate_dst_rdma_rank<kLowLatencyMode>(thread_id, nvl_rank), 0);
-#endif
         __syncthreads();
 
         // Barrier
         if (thread_id == 0){
-#ifdef NIXL_DEEPEP
             DEVICE_LOG_DEBUG("rank %d notify_dispatch calling nixl_barrier 2", rank);
             nixl_barrier(nixl_ctx, true);
-#else
-            nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
-#endif
         }
         __syncthreads();
 
@@ -342,11 +287,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
 
         // Finally barrier
         if (thread_id == 32)
-#ifdef NIXL_DEEPEP
             nixl_barrier(nixl_ctx);
-#else
-            nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
-#endif
         barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
     } else {
         // Calculate meta data
@@ -401,11 +342,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
     }
 }
 
-#ifdef NIXL_DEEPEP
 #define NOTIFY_DISPATCH_LAST_ARG nixl_ctx
-#else
-#define NOTIFY_DISPATCH_LAST_ARG cpu_rdma_team
-#endif
 
 void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, int num_ranks,
                      const int* num_tokens_per_rdma_rank, int* moe_recv_rdma_counter_mapped,
@@ -418,11 +355,7 @@ void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
                      void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
                      int** barrier_signal_ptrs, int rank,
                      cudaStream_t stream, int64_t num_rdma_bytes, int64_t num_nvl_bytes,
-#ifdef NIXL_DEEPEP
                      bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx) {
-#else
-                     bool low_latency_mode) {
-#endif
 #define NOTIFY_DISPATCH_LAUNCH_CASE(num_rdma_ranks) { \
     auto notify_dispatch_func = low_latency_mode ? \
         notify_dispatch<true, num_rdma_ranks> : notify_dispatch<false, num_rdma_ranks>; \
@@ -475,11 +408,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
          int scale_token_stride, int scale_hidden_stride,
          void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
          void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
-#ifdef NIXL_DEEPEP
          int rank, int num_ranks, internode::gpu_nixl_ctx nixl_ctx) {
-#else
-         int rank, int num_ranks) {
-#endif
     enum class WarpRole {
         kRDMASender,
         kRDMASenderCoordinator,
@@ -499,10 +428,6 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
     if(thread_id ==0) {
         DEVICE_LOG_DEBUG("dispatch rank: %d, sm_id: %d, num_channels: %d, channel_id: %d, warp_id: %d, lane_id: %d, is_forwarder: %d, rdma_rank: %d, nvl_rank: %d, send_nvl_head: %p, send_rdma_head: %p", rank, sm_id, num_channels, channel_id, warp_id, lane_id, is_forwarder, rdma_rank, nvl_rank, send_nvl_head, send_rdma_head);
     }
-
-#ifndef NIXL_DEEPEP
-    EP_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe == num_channels or ibgda_get_state()->num_rc_per_pe >= num_sms);
-#endif
 
     const auto role_meta = [=]() -> std::pair<WarpRole, int> {
         if (is_forwarder) {
@@ -537,13 +462,11 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
     // TODO_Roey: remove head/tail from rdma_buffer for NIXL DEEPEP
     auto rdma_channel_head = SymBuffer<uint64_t, false>(rdma_buffer_ptr, 1, kNumRDMARanks, channel_id, num_channels);
     auto rdma_channel_tail = SymBuffer<uint64_t, false>(rdma_buffer_ptr, 1, kNumRDMARanks, channel_id, num_channels);
-#ifdef NIXL_DEEPEP
     // With unified context, handles are indexed by [rdma_rank], counters by [channel_id * num_rdma_ranks + rdma_rank]
     nixlGpuXferReqH* channel_data_request_handles = nixl_ctx.data_request_handles;
     nixlGpuXferReqH* channel_head_request_handles = nixl_ctx.remote_head_counter_handles;
     uint64_t* channel_local_head_counters = nixl_ctx.local_head_counters_for_channel(channel_id);
     uint64_t* channel_local_tail_counters = nixl_ctx.local_tail_counters_for_channel(channel_id);
-#endif
 
     // NVL buffer layouts
     // NOTES: `rs_wr_buffer_ptr` means "Read for Senders, Write for Receivers", `ws_rr_buffer_ptr` means "Write for Senders, Read for Receivers"
@@ -616,8 +539,6 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
 
             // Issue RDMA for non-local ranks
             if (dst_rdma_rank != rdma_rank) {
-#ifdef NIXL_DEEPEP
-                // __shared__ nixlGpuXferStatusH request_status;
                 size_t src_offset = reinterpret_cast<uint64_t>(rdma_channel_meta.send_buffer(dst_rdma_rank)) - reinterpret_cast<uint64_t>(initial_rdma_buffer_ptr);
                 size_t dst_offset = reinterpret_cast<uint64_t>(rdma_channel_meta.recv_buffer(rdma_rank)) - reinterpret_cast<uint64_t>(initial_rdma_buffer_ptr);
                 unsigned int dlist_idx = 0;
@@ -625,13 +546,6 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                 DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d channel %d | dst_rdma_rank: %d| RDMA SENDER ISSUE RDMA", rank, warp_id, channel_id, dst_rdma_rank);
                 EP_DEVICE_ASSERT(nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::WARP>(channel_data_request_handles[dst_rdma_rank], 1, &dlist_idx, &msg_size, &src_offset, &dst_offset, 0, 0, 0, channel_id) == NIXL_IN_PROG);
                 DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d channel %d | dst_rdma_rank: %d| RDMA SENDER ISSUE RDMA DONE", rank, warp_id, channel_id, dst_rdma_rank);
-#else
-                nvshmemi_ibgda_put_nbi_warp<true>(reinterpret_cast<uint64_t>(rdma_channel_meta.recv_buffer(rdma_rank)),
-                                                  reinterpret_cast<uint64_t>(rdma_channel_meta.send_buffer(dst_rdma_rank)),
-                                                  sizeof(int) * (NUM_MAX_NVL_PEERS * 2 + 2),
-                                                  translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
-                                                  channel_id, lane_id, 0);
-#endif
             }
         }
         sync_rdma_sender_smem();
@@ -661,12 +575,8 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
             int last_cached_rdma_channel_head = cached_rdma_channel_head;
 #endif
             while (is_token_in_rank_uint64 != 0 and rdma_tail_idx - cached_rdma_channel_head >= num_max_rdma_chunked_recv_tokens) {
-#ifdef NIXL_DEEPEP
                 //TODO: review load acquire semantics - reading from memory updated by remote rank
                 cached_rdma_channel_head = static_cast<int>(ld_volatile_global(&channel_local_head_counters[lane_id]));
-#else
-                cached_rdma_channel_head = static_cast<int>(ld_volatile_global(rdma_channel_head.buffer(lane_id)));
-#endif
 #ifdef ENABLE_DEBUG_LOGS
                 if (last_cached_rdma_channel_head != cached_rdma_channel_head) {
                     DEVICE_LOG_DEBUG_LANE(lane_id, "[DISPATCH DEBUG] rank %d warp %d channel %d | RDMA SENDER HEAD UPDATED | lane_id: %d | cached_rdma_channel_head: %d | last_cached_rdma_channel_head: %d | head pointer: %p", rank, warp_id, channel_id, lane_id, cached_rdma_channel_head, last_cached_rdma_channel_head, (void*)&channel_local_head_counters[lane_id]);
@@ -854,8 +764,6 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                     const size_t num_bytes_per_msg = num_bytes_per_token * num_tokens_to_issue;
                     const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + dst_slot_idx * num_bytes_per_token);
                     const auto src_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + dst_slot_idx * num_bytes_per_token);
-#ifdef NIXL_DEEPEP
-                    // __shared__ nixlGpuXferStatusH request_status;
                     size_t src_offset = reinterpret_cast<uint64_t>(src_ptr) - reinterpret_cast<uint64_t>(initial_rdma_buffer_ptr);
                     size_t dst_offset = reinterpret_cast<uint64_t>(dst_ptr) - reinterpret_cast<uint64_t>(initial_rdma_buffer_ptr);
                     unsigned int dlist_idx = 0;
@@ -863,11 +771,6 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                     DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d channel %d | RDMA SENDER COORDINATOR | dst_rdma_rank: %d | SENDING num_tokens_to_issue: %d |last_issued_tail: %d", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, synced_last_issued_tail);
                     EP_DEVICE_ASSERT(nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::WARP>(channel_data_request_handles[dst_rdma_rank], 1, &dlist_idx, &msg_size, &src_offset, &dst_offset, 1, num_tokens_to_issue, 0, channel_id) == NIXL_IN_PROG);
                     DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d channel %d | RDMA SENDER COORDINATOR - done | dst_rdma_rank: %d | SENDING num_tokens_to_issue: %d |last_issued_tail: %d", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, synced_last_issued_tail);
-                    // poll_request_status<NIXL_GPU_XFER_COORDINATION_WARP>(&request_status,rank);
-#else
-                    nvshmemi_ibgda_put_nbi_warp<true>(dst_ptr, src_ptr, num_bytes_per_msg,
-                                                      translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), channel_id, lane_id, 0);
-#endif
                 } else {
                     // Lighter fence for local RDMA rank
                     memory_fence();
@@ -878,10 +781,6 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                 if (lane_id == dst_rdma_rank) {
                     last_issued_tail += num_tokens_to_issue;
                     num_tokens_to_send -= num_tokens_to_issue;
-#ifndef NIXL_DEEPEP
-                    nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_tail.buffer(rdma_rank), num_tokens_to_issue,
-                                                    translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), channel_id, dst_rdma_rank == rdma_rank);
-#else
                     if (dst_rdma_rank == rdma_rank) {
                         DEVICE_LOG_DEBUG_LANE(0, "rank %d warp %d | channel %d | dst rdma rank %d | RDMA SENDER COORDINATOR | TAIL UPDATED (local), num_tokens_to_issue: %d, num_tokens_to_send: %d | last_issued_tail: %d | local counter pointer: %p", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, num_tokens_to_send, last_issued_tail, (void*)&channel_local_tail_counters[dst_rdma_rank]);
                         atomicAdd(reinterpret_cast<unsigned long long*>(&channel_local_tail_counters[dst_rdma_rank]), static_cast<unsigned long long>(num_tokens_to_issue));
@@ -891,7 +790,6 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                         // DEVICE_LOG_DEBUG_LANE(0, "[DEBUG] rank %d warp %d | channel %d | dst rdma rank %d | RDMA SENDER COORDINATOR | TAIL UPDATED (remote) - signal, num_tokens_to_issue: %d, num_tokens_to_send: %d | last_issued_tail: %d", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, num_tokens_to_send, last_issued_tail);
                         // nixlPostPartialGpuXferReq<NIXL_GPU_XFER_COORDINATION_THREAD>(channel_data_requests_handles[dst_rdma_rank], num_tokens_to_issue, 0, nullptr, nullptr, nullptr, nullptr, nullptr);
                     }
-#endif
                 }
                 __syncwarp();
             }
@@ -989,7 +887,6 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                 src_rdma_rank = (src_rdma_rank + 1) % kNumRDMARanks;
                 if (__shfl_sync(0xffffffff, num_tokens_to_recv_from_rdma, src_rdma_rank) > 0) {
                     if (lane_id == src_rdma_rank and cached_rdma_channel_head == cached_rdma_channel_tail)
-#ifdef NIXL_DEEPEP
                     {
                         cached_rdma_channel_tail = static_cast<int>(ld_acquire_sys_global(&channel_local_tail_counters[src_rdma_rank]));
 #ifdef ENABLE_DEBUG_LOGS
@@ -1004,9 +901,6 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                         polling_counter++;
 #endif
                     }
-#else
-                        cached_rdma_channel_tail = static_cast<int>(ld_acquire_sys_global(rdma_channel_tail.buffer(src_rdma_rank)));
-#endif
                     if (__shfl_sync(0xffffffff, cached_rdma_channel_tail > cached_rdma_channel_head, src_rdma_rank))
                     {
                         DEVICE_LOG_DEBUG_LANE(src_rdma_rank, "rank %d warp %d channel %d src_rdma_rank %d | RDMA CHANNEL TAIL UPDATED | num_tokens_to_recv_from_rdma: %d cached_rdma_channel_tail: %d cached_rdma_channel_head: %d tail pointer: %p", rank, warp_id, channel_id, src_rdma_rank, num_tokens_to_recv_from_rdma, cached_rdma_channel_tail, cached_rdma_channel_head, (void*)&channel_local_tail_counters[src_rdma_rank]);
@@ -1134,7 +1028,6 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
 
             // Update remote head
             if (min_head != std::numeric_limits<int>::max() and min_head >= last_head + num_max_rdma_chunked_send_tokens and lane_id < kNumRDMARanks) {
-#ifdef NIXL_DEEPEP
                 if(lane_id == rdma_rank){
                     DEVICE_LOG_DEBUG("rank %d warp %d channel %d | KForwarderCoordinator | LOCAL HEAD UPDATE | head change: %d | new_head: %lu| local counter pointer: %p", rank, warp_id, channel_id, min_head - last_head, ld_acquire_sys_global(&channel_local_head_counters[lane_id]), (void*)&channel_local_head_counters[lane_id]);
                     atomicAdd(reinterpret_cast<unsigned long long*>(&channel_local_head_counters[lane_id]), static_cast<unsigned long long>(min_head - last_head));
@@ -1161,10 +1054,6 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                     // printf("[DEBUG] rank %d warp %d channel %d | KForwarderCoordinator REMOTE HEAD UPDATE - passed polling | dst_rank: %d| head change: %d status: %d", rank, warp_id, channel_id, lane_id, min_head - last_head, status);
                     // #endif
                 }
-#else
-                nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_head.buffer(rdma_rank), min_head - last_head,
-                                                translate_dst_rdma_rank<kLowLatencyMode>(lane_id, nvl_rank), channel_id + num_channels, lane_id == rdma_rank);
-#endif
                 last_head = min_head;
             }
 
@@ -1297,11 +1186,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
     }
 }
 
-#ifdef NIXL_DEEPEP
 #define NIXL_CTX_ARG ,nixl_ctx
-#else
-#define NIXL_CTX_ARG 
-#endif
 
 void dispatch(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
               const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
@@ -1315,11 +1200,7 @@ void dispatch(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
               void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
               void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
               int rank, int num_ranks, bool is_cached_dispatch,
-#ifdef NIXL_DEEPEP
               cudaStream_t stream, int num_channels, bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx) {
-#else
-              cudaStream_t stream, int num_channels, bool low_latency_mode) {
-#endif
     constexpr int kNumDispatchRDMASenderWarps = 7;
     constexpr int kNumTMABytesPerWarp = 16384;
     constexpr int smem_size = kNumTMABytesPerWarp * NUM_MAX_NVL_PEERS;
@@ -1363,11 +1244,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
                               const int* rdma_channel_prefix_matrix, const int* rdma_rank_prefix_sum, int* combined_nvl_head,
                               void* rdma_buffer_ptr,
                               void** buffer_ptrs, int** barrier_signal_ptrs, int rank, int num_ranks,
-#ifdef NIXL_DEEPEP
                               bool is_cached_dispatch, internode::gpu_nixl_ctx nixl_ctx) {
-#else
-                              bool is_cached_dispatch, const nvshmem_team_t rdma_team) {
-#endif
     auto sm_id = static_cast<int>(blockIdx.x);
     auto thread_id = static_cast<int>(threadIdx.x);
     auto num_threads = static_cast<int>(blockDim.x);
@@ -1381,24 +1258,12 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
 
     // Using two SMs, which clean the RDMA/NVL buffer respectively
     if (sm_id == 0) {
-#ifndef NIXL_DEEPEP
-        auto qps_per_rdma_rank = ibgda_get_state()->num_rc_per_pe * ibgda_get_state()->num_devices_initialized;
-        for (int i = thread_id; i < qps_per_rdma_rank * (num_rdma_ranks - 1); i += num_threads) {
-            auto dst_rdma_rank = (i / qps_per_rdma_rank + rdma_rank + 1) % num_rdma_ranks;
-            auto qp_id = i % qps_per_rdma_rank;
-            nvshmemi_ibgda_quiet(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), qp_id);
-        }
-#endif
         __syncthreads();
 
         // Barrier for RDMA
         if (thread_id == 32) {
-#ifdef NIXL_DEEPEP
             DEVICE_LOG_DEBUG("rank %d warp %d | CACHED NOTIFY | RDMA BARRIER | num_rdma_ranks: %d, num_channels: %d, rank: %d, rdma_rank: %d", rank, warp_id, num_rdma_ranks, num_channels, rank, rdma_rank);
             nixl_barrier(nixl_ctx, true);
-#else
-            nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
-#endif
         }
 
         // Barrier for NVL
@@ -1410,7 +1275,6 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
         for (int i = thread_id; i < rdma_num_int_clean; i += num_threads)
             rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
 
-#ifdef NIXL_DEEPEP
         // With unified context, counters are indexed by [channel_id * num_rdma_ranks + rdma_rank]
         for (int i = 0; i < num_channels; ++ i) {
             if (thread_id < num_rdma_ranks) {
@@ -1418,7 +1282,6 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
                 *nixl_ctx.local_tail_counter_get(i, thread_id) = 0;
             }
         }
-#endif
         // Clean NVL buffer
         auto nvl_buffer_ptr_int = static_cast<int*>(buffer_ptrs[nvl_rank]);
         #pragma unroll
@@ -1428,11 +1291,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
 
         // Barrier again
         if (thread_id == 32)
-#ifdef NIXL_DEEPEP
             nixl_barrier(nixl_ctx);
-#else
-            nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
-#endif
         barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
     } else if (sm_id == 1) {
         if (is_cached_dispatch)
@@ -1532,11 +1391,7 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
                    void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
                    int** barrier_signal_ptrs, int rank, cudaStream_t stream,
                    int64_t num_rdma_bytes, int64_t num_nvl_bytes,
-#ifdef NIXL_DEEPEP
                    bool is_cached_dispatch, bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx) {
-#else
-                   bool is_cached_dispatch, bool low_latency_mode) {
-#endif
     const int num_threads = std::max(128, 32 * num_channels);
     const int num_warps = num_threads / 32;
     const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
@@ -1720,11 +1575,7 @@ combine(int4* combined_x, float* combined_topk_weights,
         int num_tokens, int num_combined_tokens, int hidden, int num_topk,
         void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
         void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
-#ifdef NIXL_DEEPEP
         int rank, int num_ranks, internode::gpu_nixl_ctx nixl_ctx) {
-#else
-        int rank, int num_ranks) {
-#endif
     enum class WarpRole {
         kNVLSender,
         kNVLAndRDMAForwarder,
@@ -1897,14 +1748,12 @@ combine(int4* combined_x, float* combined_topk_weights,
     } else {
         // Combiners and coordinators
         // RDMA symmetric layout
-#ifdef NIXL_DEEPEP
         void* init_rdma_buffer_ptr = rdma_buffer_ptr;
         // With unified context, handles are indexed by [rdma_rank], counters by [channel_id * num_rdma_ranks + rdma_rank]
         nixlGpuXferReqH* channel_data_request_handles = nixl_ctx.data_request_handles;
         nixlGpuXferReqH* channel_head_request_handles = nixl_ctx.remote_head_counter_handles;
         uint64_t* channel_local_head_counters = nixl_ctx.local_head_counters_for_channel(channel_id);
         uint64_t* channel_local_tail_counters = nixl_ctx.local_tail_counters_for_channel(channel_id);
-#endif
         auto rdma_channel_data = SymBuffer<int8_t>(rdma_buffer_ptr, num_max_rdma_chunked_recv_tokens * num_bytes_per_token, kNumRDMARanks, channel_id, num_channels);
         auto rdma_channel_head = SymBuffer<uint64_t, false>(rdma_buffer_ptr, 1, kNumRDMARanks, channel_id, num_channels);
         auto rdma_channel_tail = SymBuffer<uint64_t, false>(rdma_buffer_ptr, 1, kNumRDMARanks, channel_id, num_channels);
@@ -1993,23 +1842,14 @@ combine(int4* combined_x, float* combined_topk_weights,
                 while (sub_warp_id == 0 and lane_id == 0) {
                     // Inequality: `num_max_rdma_chunked_recv_tokens - (tail - head) >= num_chunked_tokens`
                     // Here, `token_start_idx` is the actual tail
-#ifdef NIXL_DEEPEP
                     int num_used_slots = token_start_idx - ld_volatile_global(&channel_local_head_counters[dst_rdma_rank]);
-#else
-                    int num_used_slots = token_start_idx - ld_volatile_global(rdma_channel_head.buffer(dst_rdma_rank));
-#endif
                     if (num_max_rdma_chunked_recv_tokens - num_used_slots >= num_chunked_tokens)
                         break;
 
                     // Timeout check
                     if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-#ifdef NIXL_DEEPEP
                         printf("DeepEP combine forwarder (RDMA check) timeout, channel: %d, RDMA: %d, nvl: %d, dst RDMA: %d, head: %ld, tail: %d, chunked: %d\n",
                                channel_id, rdma_rank, nvl_rank, dst_rdma_rank, ld_acquire_sys_global(&channel_local_head_counters[dst_rdma_rank]), token_start_idx, num_chunked_tokens);
-#else
-                        printf("DeepEP combine forwarder (RDMA check) timeout, channel: %d, RDMA: %d, nvl: %d, dst RDMA: %d, head: %ld, tail: %d, chunked: %d\n",
-                               channel_id, rdma_rank, nvl_rank, dst_rdma_rank, ld_volatile_global(rdma_channel_head.buffer(dst_rdma_rank)), token_start_idx, num_chunked_tokens);
-#endif
                         trap();
                     }
                 }
@@ -2066,20 +1906,13 @@ combine(int4* combined_x, float* combined_topk_weights,
                         const size_t num_bytes_per_msg = num_chunked_tokens * num_bytes_per_token;
                         const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + rdma_slot_idx * num_bytes_per_token);
                         const auto src_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + rdma_slot_idx * num_bytes_per_token);
-#ifdef NIXL_DEEPEP
                         DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d | RDMA FORWARDER, dst_rdma_rank: %d, channel_id: %d, lane_id: %d ,num_tokens_to_issue: %d", rank, warp_id, dst_rdma_rank, channel_id, lane_id, num_chunked_tokens);
-                        // __shared__ nixlGpuXferStatusH request_status;
                         size_t src_offset = reinterpret_cast<uint64_t>(src_ptr) - reinterpret_cast<uint64_t>(init_rdma_buffer_ptr);
                         size_t dst_offset = reinterpret_cast<uint64_t>(dst_ptr) - reinterpret_cast<uint64_t>(init_rdma_buffer_ptr);
                         unsigned int dlist_idx = 0;
                         size_t msg_size = num_bytes_per_msg;
                         EP_DEVICE_ASSERT(nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::WARP>(channel_data_request_handles[translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank)], 1, &dlist_idx, &msg_size, &src_offset, &dst_offset, 0, 0, 0, channel_id) == NIXL_IN_PROG);
                         //TODO: NIXL DEEPEP - Change this when nixl support post without polling
-                        // poll_request_status<NIXL_GPU_XFER_COORDINATION_WARP>(&request_status,rank);
-#else
-                        nvshmemi_ibgda_put_nbi_warp<true>(dst_ptr, src_ptr, num_bytes_per_msg,
-                                                          translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), channel_id, lane_id, 0);
-#endif
                     } else {
                         memory_fence();
                     }
@@ -2087,10 +1920,6 @@ combine(int4* combined_x, float* combined_topk_weights,
                     // Write new RDMA tail
                     __syncwarp();
                     if (lane_id == 0) {
-#ifndef NIXL_DEEPEP
-                        nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_tail.buffer(rdma_rank), num_chunked_tokens,
-                                                        translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), channel_id, dst_rdma_rank == rdma_rank);
-#else
                         if(dst_rdma_rank == rdma_rank){
                             DEVICE_LOG_DEBUG("rank %d warp %d | RDMA FORWARDER | LOCAL TAIL UPDATED | dst_rdma_rank: %d, channel_id: %d, lane_id: %d, num_chunked_tokens: %d | local counter pointer: %p", rank, warp_id, dst_rdma_rank, channel_id, lane_id, num_chunked_tokens, (void*)&channel_local_tail_counters[rdma_rank]);
                             atomicAdd(reinterpret_cast<unsigned long long*>(&channel_local_tail_counters[rdma_rank]), static_cast<unsigned long long>(num_chunked_tokens));
@@ -2098,7 +1927,6 @@ combine(int4* combined_x, float* combined_topk_weights,
                             DEVICE_LOG_DEBUG("rank %d warp %d | RDMA FORWARDER | REMOTE TAIL UPDATED | dst_rdma_rank: %d, num_chunked_tokens: %d", rank, warp_id, dst_rdma_rank, num_chunked_tokens);
                             EP_DEVICE_ASSERT(nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::THREAD>(channel_data_request_handles[dst_rdma_rank], 0, nullptr, nullptr, nullptr, nullptr, 1, num_chunked_tokens, 0, channel_id) == NIXL_IN_PROG);
                         }
-#endif
                     }
                 }
             }
@@ -2141,16 +1969,12 @@ combine(int4* combined_x, float* combined_topk_weights,
                 int nvl_recevier_poll_counter = 1;
 #endif
                 while (cached_channel_tail_idx <= expected_head) {
-#ifdef NIXL_DEEPEP
                     cached_channel_tail_idx = static_cast<int>(ld_acquire_sys_global(&channel_local_tail_counters[lane_id]));
 #ifdef ENABLE_DEBUG_LOGS
                     if (nvl_recevier_poll_counter % 100000 == 0) {
                         DEVICE_LOG_DEBUG_LANE(lane_id, "rank %d warp %d | RDMA RECEIVER, lane_id: %d, cached_channel_tail_idx: %d, expected_head: %d, print_count: %d", rank, warp_id, lane_id, cached_channel_tail_idx, expected_head, nvl_recevier_poll_counter);
                     }
                     nvl_recevier_poll_counter++;
-#endif
-#else
-                    cached_channel_tail_idx = static_cast<int>(ld_acquire_sys_global(rdma_channel_tail.buffer(lane_id)));
 #endif
 
                     // Timeout check
@@ -2211,12 +2035,10 @@ combine(int4* combined_x, float* combined_topk_weights,
                     for (int i = 0; i < kNumRDMAReceivers; ++ i) if (not rdma_receiver_retired[i])
                         min_head = min(min_head, rdma_receiver_rdma_head[i][dst_rdma_rank]);
                     if (min_head != std::numeric_limits<int>::max() and min_head >= last_rdma_head + num_max_rdma_chunked_send_tokens and lane_id < kNumRDMARanks) {
-#ifdef NIXL_DEEPEP
                         if (dst_rdma_rank == rdma_rank) {
                             atomicAdd(reinterpret_cast<unsigned long long*>(&channel_local_head_counters[dst_rdma_rank]), static_cast<unsigned long long>(min_head - last_rdma_head));
                         } else {
                             DEVICE_LOG_DEBUG("rank %d warp %d | RDMA FORWARDER | INTERNODE HEAD UPDATED | dst_rdma_rank: %d, channel_id: %d, lane_id: %d, head change: %d", rank, warp_id, dst_rdma_rank, channel_id, lane_id, min_head - last_rdma_head);
-                            // nixlGpuXferStatusH request_status;
                             EP_DEVICE_ASSERT(nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::THREAD>(channel_head_request_handles[dst_rdma_rank], 0, nullptr, nullptr, nullptr, nullptr, 0, min_head - last_rdma_head, 0, channel_id) == NIXL_IN_PROG);
                             //nixl_status_t status = nixlPostSignalGpuXferReq<NIXL_GPU_XFER_COORDINATION_THREAD>(channel_head_request_handles[dst_rdma_rank], min_head - last_rdma_head, 0, nullptr);
                             // if (status != NIXL_SUCCESS) {
@@ -2227,10 +2049,6 @@ combine(int4* combined_x, float* combined_topk_weights,
                             //TODO: NIXL DEEPEP - Change this when nixl support post without polling
                             // poll_request_status<NIXL_GPU_XFER_COORDINATION_THREAD>(&request_status,rank);
                         }
-#else
-                        nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_head.buffer(rdma_rank), min_head - last_rdma_head,
-                                                        translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), channel_id + num_channels, dst_rdma_rank == rdma_rank);
-#endif
                         last_rdma_head = min_head;
                     }
                 } else {
@@ -2268,11 +2086,7 @@ void combine(cudaDataType_t type,
              int num_tokens, int num_combined_tokens, int hidden, int num_topk,
              void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
              void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
-#ifdef NIXL_DEEPEP
              int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx) {
-#else
-             int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode) {
-#endif
     constexpr int kNumCombineForwarderWarps = 24;
     constexpr int kNumTMABytesPerSenderWarp = 16384;
     constexpr int kNumTMABytesPerForwarderWarp = 9248;
