@@ -7,7 +7,7 @@
 #include "exception.cuh"
 #endif
 
-namespace deep_ep {
+namespace nixl_ep {
 
 // Intranode runtime
 namespace intranode {
@@ -89,39 +89,45 @@ void combine(cudaDataType_t type,
 // Internode kernels
 namespace internode {
 #ifdef NIXL_DEEPEP
-struct gpu_channel_nixl_ctx {
-    //arrays of elements per remote rdma rank
+// New unified context structure - single set of handles per rank, channel_id passed to NIXL API
+struct gpu_nixl_ctx {
+    // Data transfer handles - indexed by [dest_rdma_rank]
     nixlGpuXferReqH *data_request_handles;
     nixlGpuXferReqH *remote_head_counter_handles;
+    
+    // Per-channel counters - indexed by [channel_id * num_rdma_ranks + rdma_rank]
     uint64_t *local_head_counters;
     uint64_t *local_tail_counters;
-
+    
+    // Barrier (shared across channels)
     uint64_t *last_barrier_counter;
     uint64_t *local_barrier_counter_ptr;
     nixlGpuXferReqH *remote_barrier_handles;
-
-    __device__ inline int get_local_head_counter(int rank) {
-        return local_head_counters[rank];
-    }
-
-    __device__ inline int get_local_tail_counter(int rank) {
-        return local_tail_counters[rank];
-    }
-
-    __device__ inline nixlGpuXferReqH get_remote_head_handle(int rank) {
-        return remote_head_counter_handles[rank];
-    }
-
-    __device__ inline nixlGpuXferReqH get_remote_data_handle(int rank) {
-        return data_request_handles[rank];
-    }
-};
-
-struct gpu_nixl_ctx {
-    struct gpu_channel_nixl_ctx *channel_ctxs; // [num_channels]
+    
     int num_channels;
     int num_rdma_ranks;
     int rank;
+
+    // Helper methods for counter access
+    __device__ inline uint64_t* local_head_counter_get(int channel_id, int rdma_rank) {
+        return &local_head_counters[channel_id * num_rdma_ranks + rdma_rank];
+    }
+
+    __device__ inline uint64_t* local_tail_counter_get(int channel_id, int rdma_rank) {
+        return &local_tail_counters[channel_id * num_rdma_ranks + rdma_rank];
+    }
+
+    __device__ inline nixlGpuXferReqH data_request_get(int rdma_rank) {
+        return data_request_handles[rdma_rank];
+    }
+
+    __device__ inline nixlGpuXferReqH head_counter_request_get(int rdma_rank) {
+        return remote_head_counter_handles[rdma_rank];
+    }
+
+    __device__ inline nixlGpuXferReqH remote_barrier_get(int rdma_rank) {
+        return remote_barrier_handles[rdma_rank];
+    }
 };
 #endif
 
@@ -311,4 +317,4 @@ void clean_mask_buffer(int* mask_buffer_ptr, int num_ranks, cudaStream_t stream)
 
 } // namespace internode_ll
 
-} // namespace deep_ep
+} // namespace nixl_ep
