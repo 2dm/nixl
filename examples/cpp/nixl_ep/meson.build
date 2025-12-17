@@ -64,6 +64,7 @@ endif
 nixl_ep_sources = [
     'csrc/nixl_ep.cpp',
     'csrc/kernels/nixl_ep.cu',
+    'csrc/kernels/layout.cu',
 ]
 
 nixl_ep_inc_dirs = [

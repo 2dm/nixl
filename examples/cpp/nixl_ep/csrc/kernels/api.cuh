@@ -97,10 +97,10 @@ struct gpu_nixl_ctx {
     }
 };
 
-void clean_buffer(int* clean_0, int num_clean_int_0,
+void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
                               int* clean_1, int num_clean_int_1,
                               int rank, int num_ranks, int* mask_buffer, int* sync_buffer,
-                              cudaStream_t stream);
+                              ep_kernels::gpu_nixl_ctx nixl_ctx, cudaStream_t stream);
 
 void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int* packed_recv_src_info, int64_t* packed_recv_layout_range,
@@ -244,5 +244,16 @@ void combine(cudaDataType_t type,
              int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx);
 
 } // namespace internode
+
+// Layout kernels
+namespace layout {
+
+void get_dispatch_layout(const int64_t* topk_idx,
+                         int* num_tokens_per_rank, int* num_tokens_per_rdma_rank,
+                         int* num_tokens_per_expert, bool* is_token_in_rank,
+                         int num_tokens, int num_topk, int num_ranks, int num_experts,
+                         cudaStream_t stream);
+
+} // namespace layout
 
 } // namespace nixl_ep

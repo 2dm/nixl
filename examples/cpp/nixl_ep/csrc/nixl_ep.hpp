@@ -94,9 +94,71 @@ struct nixl_ep_ctx {
     ep_kernels::gpu_nixl_ctx gpu[2]; // Double buffering
 };
 
+class nixl_internode_ctx {
+public:
+    internode::gpu_nixl_ctx gpu_ctx;
+    std::vector<nixlXferReqH*> cpu_data_reqs; // [num_rdma_ranks]
+    std::vector<nixlXferReqH*> cpu_counter_reqs; // [num_rdma_ranks]
+    std::vector<nixlXferReqH*> cpu_barrier_reqs; // [num_rdma_ranks]
+    int num_rdma_ranks = 0;
+    int num_channels = 0;
+    int rank = 0;
+
+    nixl_internode_ctx(unsigned int num_channels = 0, unsigned int num_rdma_ranks = 0, int rank = 0)
+        : num_rdma_ranks(num_rdma_ranks), num_channels(num_channels), rank(rank) {
+        cpu_data_reqs.resize(num_rdma_ranks, nullptr);
+        cpu_counter_reqs.resize(num_rdma_ranks, nullptr);
+        cpu_barrier_reqs.resize(num_rdma_ranks, nullptr);
+        
+        // Allocate GPU memory for handles
+        CUDA_CHECK(cudaMalloc(&gpu_ctx.data_request_handles, sizeof(nixlGpuXferReqH) * num_rdma_ranks));
+        CUDA_CHECK(cudaMalloc(&gpu_ctx.remote_head_counter_handles, sizeof(nixlGpuXferReqH) * num_rdma_ranks));
+        CUDA_CHECK(cudaMalloc(&gpu_ctx.remote_barrier_handles, sizeof(nixlGpuXferReqH) * num_rdma_ranks));
+        CUDA_CHECK(cudaMemset(gpu_ctx.remote_barrier_handles, 0, sizeof(nixlGpuXferReqH) * num_rdma_ranks));
+        
+        // Allocate counters
+        CUDA_CHECK(cudaMalloc(&gpu_ctx.local_head_counters, sizeof(uint64_t) * num_channels * num_rdma_ranks));
+        CUDA_CHECK(cudaMalloc(&gpu_ctx.local_tail_counters, sizeof(uint64_t) * num_channels * num_rdma_ranks));
+        CUDA_CHECK(cudaMemset(gpu_ctx.local_head_counters, 0, sizeof(uint64_t) * num_channels * num_rdma_ranks));
+        CUDA_CHECK(cudaMemset(gpu_ctx.local_tail_counters, 0, sizeof(uint64_t) * num_channels * num_rdma_ranks));
+        
+        // Allocate barrier counters
+        CUDA_CHECK(cudaMalloc(&gpu_ctx.last_barrier_counter, sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&gpu_ctx.local_barrier_counter_ptr, sizeof(uint64_t)));
+        CUDA_CHECK(cudaMemset(gpu_ctx.last_barrier_counter, 0, sizeof(uint64_t)));
+        CUDA_CHECK(cudaMemset(gpu_ctx.local_barrier_counter_ptr, 0, sizeof(uint64_t)));
+        
+        gpu_ctx.num_channels = num_channels;
+        gpu_ctx.num_rdma_ranks = num_rdma_ranks;
+        gpu_ctx.rank = rank;
+    }
+
+    ~nixl_internode_ctx() noexcept(false) {
+        CUDA_CHECK(cudaFree(gpu_ctx.data_request_handles));
+        CUDA_CHECK(cudaFree(gpu_ctx.remote_head_counter_handles));
+        CUDA_CHECK(cudaFree(gpu_ctx.remote_barrier_handles));
+        CUDA_CHECK(cudaFree(gpu_ctx.local_head_counters));
+        CUDA_CHECK(cudaFree(gpu_ctx.local_tail_counters));
+        CUDA_CHECK(cudaFree(gpu_ctx.last_barrier_counter));
+        CUDA_CHECK(cudaFree(gpu_ctx.local_barrier_counter_ptr));
+    }
+
+    void copy_to_gpu() {
+        // GPU context is already allocated, just update metadata
+        gpu_ctx.num_channels = num_channels;
+        gpu_ctx.num_rdma_ranks = num_rdma_ranks;
+        gpu_ctx.rank = rank;
+    }
+};
+
 struct Buffer {
 private:
-    int buffer_idx = 0; // Double buffering index
+    int buffer_idx = 0; // Double buffering index for low-latency mode
+
+    // NVLink Buffer (for high-throughput mode)
+    int64_t num_nvl_bytes = 0;
+    void* buffer_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
+    void** buffer_ptrs_gpu = nullptr;
 
     // RDMA Buffer
     int64_t num_rdma_bytes;
@@ -110,9 +172,10 @@ private:
     // Device info and communication
     int device_id;
     int num_device_sms;
-    int rank;
-    int num_ranks;
+    int rank, rdma_rank, nvl_rank;
+    int num_ranks, num_rdma_ranks, num_nvl_ranks;
     std::vector<int> remote_ranks; /* global ranks */
+    cudaIpcMemHandle_t ipc_handles[NUM_MAX_NVL_PEERS];
 
     // Stream for communication
     at::cuda::CUDAStream comm_stream;
@@ -125,8 +188,20 @@ private:
     // After `destroy()` be called, this flag will be true
     bool destroyed = false;
 
+    // Barrier signals (for high-throughput mode)
+    int* barrier_signal_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
+    int** barrier_signal_ptrs_gpu = nullptr;
+
     // Workspace
     void* workspace = nullptr;
+
+    // Host-side MoE info (for high-throughput mode CPU-GPU sync)
+    volatile int* moe_recv_counter = nullptr;
+    int* moe_recv_counter_mapped = nullptr;
+    volatile int* moe_recv_expert_counter = nullptr;
+    int* moe_recv_expert_counter_mapped = nullptr;
+    volatile int* moe_recv_rdma_counter = nullptr;
+    int* moe_recv_rdma_counter_mapped = nullptr;
 
     std::unique_ptr<NixlAgentInfo> nixl_agent_info;
     std::vector<NixlPeerInfo> nixl_peer_info;
@@ -137,7 +212,12 @@ private:
     uint64_t max_num_ranks;
     int env_num_channels;
     nixl_xfer_dlist_t dummy_src_dlist; // TODO: Remove once NIXL supports null src dlist for signals
+    
+    // Low-latency mode context
     std::unique_ptr<nixl_ep_ctx> nixl_ctx = nullptr;
+    
+    // High-throughput internode mode context
+    std::unique_ptr<nixl_internode_ctx> internode_ctx = nullptr;
 
     /* Common private funcs */
     void _nixl_agent_init();
@@ -162,16 +242,22 @@ private:
     void _nixl_ep_p2p_ptrs_cleanup(const std::vector<int>& ranks_to_remove);
     void _nixl_ep_barrier_buffer_clear(int rank);
 
+    /* High-throughput internode mode private funcs */
+    void _nixl_internode_init();
+    void _nixl_internode_local_data_init();
+    void _nixl_internode_remote_counters_prepare();
+    void _nixl_internode_batches_prepare();
+
 public:
     Buffer(int rank, bool explicitly_destroy, bool enable_shrink);
 
-    void update_memory_buffers(int num_ranks, int64_t num_rdma_bytes);
+    void update_memory_buffers(int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes);
 
     void connect_ranks(const std::vector<int>& remote_ranks_list);
 
     void disconnect_ranks(const std::vector<int>& remote_ranks_list);
 
-    void init(int num_ranks, int64_t num_rdma_bytes);
+    void init(int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes);
 
     ~Buffer() noexcept(false);
 
@@ -179,16 +265,14 @@ public:
 
     int get_local_device_id() const;
 
-    torch::Tensor get_local_buffer_tensor(const pybind11::object& dtype, int64_t offset) const;
+    torch::Tensor get_local_buffer_tensor(const pybind11::object& dtype, int64_t offset, bool use_rdma_buffer) const;
 
     torch::Stream get_comm_stream() const;
 
     void destroy();
 
-    void clean_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts);
-
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
-    dispatch(const torch::Tensor& x, const torch::Tensor& topk_idx,
+    low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_idx,
                          const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
                          const std::optional<torch::Tensor>& dispatch_wait_recv_cost_stats,
                          int num_max_dispatch_tokens_per_rank, int num_experts,
@@ -196,7 +280,7 @@ public:
                          bool async, bool return_recv_hook);
 
     std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
-    combine(const torch::Tensor& x, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,
+    low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,
                         const torch::Tensor& src_info, const torch::Tensor& layout_range,
                         const std::optional<torch::Tensor>& combine_wait_recv_cost_stats,
                         int num_max_dispatch_tokens_per_rank, int num_experts,
@@ -206,13 +290,44 @@ public:
     void barrier();
 
     torch::Tensor
-    get_next_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const;
+    get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const;
 
     void update_mask_buffer(int rank_to_mask, bool mask);
 
     void query_mask_buffer(const torch::Tensor& mask_status);
 
     void clean_mask_buffer();
+
+    // Get the number of RDMA ranks (for determining internode vs intranode mode)
+    int get_num_rdma_ranks() const;
+
+    // Get dispatch layout for high-throughput mode
+    std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, std::optional<EventHandle>>
+    get_dispatch_layout(const torch::Tensor& topk_idx, int num_experts,
+                        const std::optional<EventHandle>& previous_event,
+                        bool async_finish, bool allocate_on_comm_stream);
+
+    // High-throughput internode dispatch
+    std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::vector<int>,
+               torch::Tensor, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor,
+               std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<EventHandle>>
+    internode_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>& x_scales,
+                       const std::optional<torch::Tensor>& topk_idx, const std::optional<torch::Tensor>& topk_weights,
+                       const std::optional<torch::Tensor>& num_tokens_per_rank, const std::optional<torch::Tensor>& num_tokens_per_rdma_rank,
+                       const torch::Tensor& is_token_in_rank, const std::optional<torch::Tensor>& num_tokens_per_expert,
+                       int cached_num_recv_tokens, int cached_num_rdma_recv_tokens,
+                       const std::optional<torch::Tensor>& cached_rdma_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_rdma_rank_prefix_sum,
+                       const std::optional<torch::Tensor>& cached_gbl_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum,
+                       int expert_alignment, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
+
+    // High-throughput internode combine
+    std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
+    internode_combine(const torch::Tensor& x, const std::optional<torch::Tensor>& topk_weights,
+                      const std::optional<torch::Tensor>& bias_0, const std::optional<torch::Tensor>& bias_1,
+                      const torch::Tensor& src_meta, const torch::Tensor& is_combined_token_in_rank,
+                      const torch::Tensor& rdma_channel_prefix_matrix, const torch::Tensor& rdma_rank_prefix_sum, const torch::Tensor& gbl_channel_prefix_matrix,
+                      const torch::Tensor& combined_rdma_head, const torch::Tensor& combined_nvl_head,
+                      const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
 };
 
 } // namespace nixl_ep

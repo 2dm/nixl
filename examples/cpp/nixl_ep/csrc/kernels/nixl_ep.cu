@@ -1143,6 +1143,41 @@ void barrier(ep_kernels::gpu_nixl_ctx nixl_ctx, int* mask_buffer_ptr, int* sync_
     SETUP_LAUNCH_CONFIG(1, kNumThreads, stream);
     LAUNCH_KERNEL(&cfg, barrier<kNumThreads>, 0, nixl_ctx.rank, nixl_ctx.num_ranks, mask_buffer_ptr, sync_buffer_ptr, nixl_ctx);
 }
+
+template <int kNumThreads> __launch_bounds__(kNumThreads, 1)
+__global__ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
+                                         int* clean_1, int num_clean_int_1,
+                                         int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr,
+                                         ep_kernels::gpu_nixl_ctx nixl_ctx) {
+    auto thread_id = static_cast<int>(threadIdx.x);
+
+    // Barrier before cleaning (in case of unfinished chunked EP)
+    barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr, nixl_ctx);
+
+    // Clean both buffers
+    #pragma unroll
+    for (int i = thread_id; i < num_clean_int_0; i += kNumThreads)
+        clean_0[i] = 0;
+    #pragma unroll
+    for (int i = thread_id; i < num_clean_int_1; i += kNumThreads)
+        clean_1[i] = 0;
+
+    // Barrier after cleaning (make sure the low-latency mode works fine)
+    barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr, nixl_ctx);
+}
+
+void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
+                              int* clean_1, int num_clean_int_1,
+                              int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr,
+                              ep_kernels::gpu_nixl_ctx nixl_ctx, cudaStream_t stream) {
+    constexpr int kNumThreads = 256;
+
+    SETUP_LAUNCH_CONFIG(1, kNumThreads, stream);
+    LAUNCH_KERNEL(&cfg, clean_low_latency_buffer<kNumThreads>,
+                  clean_0, num_clean_int_0, clean_1, num_clean_int_1,
+                  rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr, nixl_ctx);
+}
+
 } // namespace ep_kernels
 
 } // namespace nixl_ep

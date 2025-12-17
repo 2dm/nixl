@@ -172,7 +172,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                         # Check combine correctness
                         for zero_copy in (False, ) if use_logfmt else (False, True):
                             if zero_copy:
-                                buffer.get_next_combine_buffer(handle)[:, :, :] = simulated_gemm_x
+                                buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
                             out = torch.empty((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
                             combined_x, event, hook = buffer.combine(simulated_gemm_x, topk_idx, topk_weights, handle,
                                                                                 use_logfmt=use_logfmt,
@@ -275,7 +275,7 @@ def worker(torch_rank: int, args: argparse.Namespace):
     os.environ['NIXL_ETCD_ENDPOINTS'] = args.etcd_server
 
     # Initialize nixl_ep buffer
-    num_rdma_bytes = nixl_ep.Buffer.get_rdma_size_hint(args.num_tokens, args.hidden_dim, max_num_ranks, args.num_experts_per_rank * max_num_ranks)
+    num_rdma_bytes = nixl_ep.Buffer.get_low_latency_rdma_size_hint(args.num_tokens, args.hidden_dim, max_num_ranks, args.num_experts_per_rank * max_num_ranks)
     if local_rank == 0:
         print(f'Allocating buffer size: {num_rdma_bytes / 1e6} MB ...', flush=True)
 
