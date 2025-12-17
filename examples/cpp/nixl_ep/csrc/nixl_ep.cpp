@@ -185,6 +185,7 @@ void Buffer::init(int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes)
     my_peer_info.wireup_ptr = wireup_buffer_ptr;
     my_peer_info.device_id = get_local_device_id();
     my_peer_info.sync_buffer_ptr = sync_buffer_ptr;
+    my_peer_info.barrier_ptr = nullptr;  // For internode barrier (initialized in _nixl_internode_init if needed)
     my_peer_info.rank = rank;
 
     // Create IPC handles for rdma buffer and counters

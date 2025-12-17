@@ -1102,9 +1102,10 @@ void clean_mask_buffer(int* mask_buffer_ptr, int num_ranks, cudaStream_t stream)
     LAUNCH_KERNEL(&cfg, clean_mask_buffer<kNumThreads>, mask_buffer_ptr, num_ranks);
 }
 
+// Device function version of barrier - can be called from within a kernel
 template <int kNumThreads>
-__global__ void barrier(int thread_id, int rank, int num_ranks, 
-                                        int* mask_buffer_ptr, int* sync_buffer_ptr, ep_kernels::gpu_nixl_ctx nixl_ctx) {
+__device__ void barrier_device(int thread_id, int rank, int num_ranks, 
+                               int* mask_buffer_ptr, int* sync_buffer_ptr, ep_kernels::gpu_nixl_ctx nixl_ctx) {
     EP_DEVICE_ASSERT(kNumThreads >= num_ranks);
     if (thread_id == 0) atomicAdd(sync_buffer_ptr + rank, -1);
     __syncthreads();
@@ -1138,10 +1139,17 @@ __global__ void barrier(int thread_id, int rank, int num_ranks,
     __syncthreads();
 }
 
+// Global kernel wrapper for barrier - used when launching barrier as a standalone kernel
+template <int kNumThreads>
+__global__ void barrier_kernel(int thread_id, int rank, int num_ranks, 
+                               int* mask_buffer_ptr, int* sync_buffer_ptr, ep_kernels::gpu_nixl_ctx nixl_ctx) {
+    barrier_device<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr, nixl_ctx);
+}
+
 void barrier(ep_kernels::gpu_nixl_ctx nixl_ctx, int* mask_buffer_ptr, int* sync_buffer_ptr, cudaStream_t stream) {
     constexpr int kNumThreads = 32;
     SETUP_LAUNCH_CONFIG(1, kNumThreads, stream);
-    LAUNCH_KERNEL(&cfg, barrier<kNumThreads>, 0, nixl_ctx.rank, nixl_ctx.num_ranks, mask_buffer_ptr, sync_buffer_ptr, nixl_ctx);
+    LAUNCH_KERNEL(&cfg, barrier_kernel<kNumThreads>, 0, nixl_ctx.rank, nixl_ctx.num_ranks, mask_buffer_ptr, sync_buffer_ptr, nixl_ctx);
 }
 
 template <int kNumThreads> __launch_bounds__(kNumThreads, 1)
@@ -1152,7 +1160,7 @@ __global__ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
     auto thread_id = static_cast<int>(threadIdx.x);
 
     // Barrier before cleaning (in case of unfinished chunked EP)
-    barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr, nixl_ctx);
+    barrier_device<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr, nixl_ctx);
 
     // Clean both buffers
     #pragma unroll
@@ -1163,7 +1171,7 @@ __global__ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
         clean_1[i] = 0;
 
     // Barrier after cleaning (make sure the low-latency mode works fine)
-    barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr, nixl_ctx);
+    barrier_device<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr, nixl_ctx);
 }
 
 void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,

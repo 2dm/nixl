@@ -60,6 +60,7 @@ struct NixlPeerInfo {
     cudaIpcMemHandle_t rdma_ipc_handle;
     cudaIpcMemHandle_t counters_ipc_handle;
     int* sync_buffer_ptr;
+    uint64_t* barrier_ptr;  // For internode barrier
     int device_id;
     int rank;
 };
@@ -297,6 +298,8 @@ public:
     void query_mask_buffer(const torch::Tensor& mask_status);
 
     void clean_mask_buffer();
+
+    void clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts);
 
     // Get the number of RDMA ranks (for determining internode vs intranode mode)
     int get_num_rdma_ranks() const;
