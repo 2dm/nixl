@@ -354,13 +354,7 @@ void Buffer::connect_ranks(const std::vector<int>& remote_ranks_list) {
             continue;
 
         new_ranks.push_back(remote_rank);
-        std::cout << "DEBUG connect_ranks: rank=" << rank << " setting mask_buffer[" << remote_rank << "]=0 (active)"
-                  << " mask_buffer_ptr=" << (void*)mask_buffer_ptr << std::endl;
         CUDA_CHECK(cudaMemset(mask_buffer_ptr + remote_rank, 0, sizeof(int)));
-        CUDA_CHECK(cudaDeviceSynchronize());
-        int verify_val;
-        CUDA_CHECK(cudaMemcpy(&verify_val, mask_buffer_ptr + remote_rank, sizeof(int), cudaMemcpyDeviceToHost));
-        std::cout << "DEBUG connect_ranks: rank=" << rank << " verified mask_buffer[" << remote_rank << "]=" << verify_val << std::endl;
 
         if (enable_shrink) {
             _nixl_ep_barrier_buffer_clear(remote_rank);
@@ -662,22 +656,9 @@ void Buffer::query_mask_buffer(const torch::Tensor& mask_status) {
     EP_HOST_ASSERT(mask_buffer_ptr != nullptr and "Shrink mode must be enabled");
     EP_HOST_ASSERT(mask_status.numel() == max_num_ranks && mask_status.scalar_type() == torch::kInt32);
 
-    std::cout << "DEBUG query_mask_buffer: rank=" << rank << " max_num_ranks=" << max_num_ranks
-              << " mask_buffer_ptr=" << (void*)mask_buffer_ptr << std::endl;
-
     ep_kernels::query_mask_buffer(mask_buffer_ptr, max_num_ranks,
                                     reinterpret_cast<int*>(mask_status.data_ptr()),
                                     at::cuda::getCurrentCUDAStream());
-
-    // Sync and print the mask values for debugging
-    CUDA_CHECK(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream()));
-    std::cout << "DEBUG query_mask_buffer: rank=" << rank << " mask_status values: [";
-    int* mask_data = reinterpret_cast<int*>(mask_status.data_ptr());
-    for (int i = 0; i < max_num_ranks; i++) {
-        std::cout << mask_data[i];
-        if (i < max_num_ranks - 1) std::cout << ", ";
-    }
-    std::cout << "]" << std::endl;
 }
 
 void Buffer::clean_mask_buffer() {

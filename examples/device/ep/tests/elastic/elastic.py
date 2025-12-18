@@ -565,24 +565,9 @@ def worker(torch_rank: int, args: argparse.Namespace):
         )
         # Query mask buffer to detect any unexpected rank failures and clean them up
         buffer.query_mask_buffer(mask_status)
-        # mask values: -1=uninitialized, 0=active, non-zero(1+)=dropped/failed
-        print(
-            f"DEBUG global_rank={global_rank}, local_rank={local_rank} -> "
-            f"mask_status[:current_num_ranks]={[mask_status[i].item() for i in range(current_num_ranks)]} "
-            f"(-1=uninit, 0=active, other=dropped), "
-            f"current_num_ranks={current_num_ranks}, remote_ranks={remote_ranks}",
-            flush=True,
-        )
         newly_failed_ranks = set()
         for r in range(current_num_ranks):
-            mask_val = mask_status[r].item()
-            is_remote = r in remote_ranks
-            if mask_val != 0 and is_remote:
-                print(
-                    f"DEBUG global_rank={global_rank}, local_rank={local_rank} -> "
-                    f"rank {r} flagged as failed: mask_val={mask_val} (expected 0=active), is_remote={is_remote}",
-                    flush=True,
-                )
+            if mask_status[r].item() != 0 and r in remote_ranks:
                 newly_failed_ranks.add(r)
 
         if len(newly_failed_ranks) > 0:
