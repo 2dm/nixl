@@ -469,17 +469,9 @@ def worker(torch_rank: int, args: argparse.Namespace):
     torch.cuda.set_device(0)
 
     # Initialize UCX
-    pxb_nics = [
-        "mlx5_0",
-        "mlx5_3",
-        "mlx5_4",
-        "mlx5_5",
-        "mlx5_6",
-        "mlx5_9",
-        "mlx5_10",
-        "mlx5_11",
-    ]
-    tcp_nics = ",ibp154s0,ibp192s0,ibp206s0,ibp220s0,ibp94s0"
+    pxb_nics = ["mlx5_0", "mlx5_1", "mlx5_2", "mlx5_4", "mlx5_5", "mlx5_6", "mlx5_7", "mlx5_8"]
+    tcp_nics = ',ibp26s0,ibp44s0,ibp64s0,ibp101s0,ibp156s0,ibp173s0,ibp192s0,ibp227s0'
+    
     os.environ["UCX_NET_DEVICES"] = f"cuda0-{pxb_nics[local_rank]}:1" + tcp_nics
 
     # Initialize NIXL
@@ -573,9 +565,24 @@ def worker(torch_rank: int, args: argparse.Namespace):
         )
         # Query mask buffer to detect any unexpected rank failures and clean them up
         buffer.query_mask_buffer(mask_status)
+        # mask values: -1=uninitialized, 0=active, non-zero(1+)=dropped/failed
+        print(
+            f"DEBUG global_rank={global_rank}, local_rank={local_rank} -> "
+            f"mask_status[:current_num_ranks]={[mask_status[i].item() for i in range(current_num_ranks)]} "
+            f"(-1=uninit, 0=active, other=dropped), "
+            f"current_num_ranks={current_num_ranks}, remote_ranks={remote_ranks}",
+            flush=True,
+        )
         newly_failed_ranks = set()
         for r in range(current_num_ranks):
-            if mask_status[r].item() != 0 and r in remote_ranks:
+            mask_val = mask_status[r].item()
+            is_remote = r in remote_ranks
+            if mask_val != 0 and is_remote:
+                print(
+                    f"DEBUG global_rank={global_rank}, local_rank={local_rank} -> "
+                    f"rank {r} flagged as failed: mask_val={mask_val} (expected 0=active), is_remote={is_remote}",
+                    flush=True,
+                )
                 newly_failed_ranks.add(r)
 
         if len(newly_failed_ranks) > 0:
