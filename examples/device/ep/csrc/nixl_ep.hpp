@@ -63,6 +63,7 @@ struct NixlPeerInfo {
     cudaIpcMemHandle_t rdma_ipc_handle;
     cudaIpcMemHandle_t counters_ipc_handle;
     int* sync_buffer_ptr;
+    uint64_t* barrier_ptr;  // For internode barrier
     int device_id;
     int rank;
 };
@@ -216,6 +217,39 @@ public:
     void query_mask_buffer(const torch::Tensor& mask_status);
 
     void clean_mask_buffer();
+
+    void clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts);
+
+    // Get the number of RDMA ranks (for determining internode vs intranode mode)
+    int get_num_rdma_ranks() const;
+
+    // Get dispatch layout for high-throughput mode
+    std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, std::optional<EventHandle>>
+    get_dispatch_layout(const torch::Tensor& topk_idx, int num_experts,
+                        const std::optional<EventHandle>& previous_event,
+                        bool async_finish, bool allocate_on_comm_stream);
+
+    // High-throughput internode dispatch
+    std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::vector<int>,
+               torch::Tensor, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor,
+               std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<EventHandle>>
+    internode_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>& x_scales,
+                       const std::optional<torch::Tensor>& topk_idx, const std::optional<torch::Tensor>& topk_weights,
+                       const std::optional<torch::Tensor>& num_tokens_per_rank, const std::optional<torch::Tensor>& num_tokens_per_rdma_rank,
+                       const torch::Tensor& is_token_in_rank, const std::optional<torch::Tensor>& num_tokens_per_expert,
+                       int cached_num_recv_tokens, int cached_num_rdma_recv_tokens,
+                       const std::optional<torch::Tensor>& cached_rdma_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_rdma_rank_prefix_sum,
+                       const std::optional<torch::Tensor>& cached_gbl_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum,
+                       int expert_alignment, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
+
+    // High-throughput internode combine
+    std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
+    internode_combine(const torch::Tensor& x, const std::optional<torch::Tensor>& topk_weights,
+                      const std::optional<torch::Tensor>& bias_0, const std::optional<torch::Tensor>& bias_1,
+                      const torch::Tensor& src_meta, const torch::Tensor& is_combined_token_in_rank,
+                      const torch::Tensor& rdma_channel_prefix_matrix, const torch::Tensor& rdma_rank_prefix_sum, const torch::Tensor& gbl_channel_prefix_matrix,
+                      const torch::Tensor& combined_rdma_head, const torch::Tensor& combined_nvl_head,
+                      const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
 };
 
 } // namespace nixl_ep

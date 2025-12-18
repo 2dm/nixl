@@ -30,7 +30,7 @@
 
 namespace nixl_ep {
 
-// EP kernels
+// EP kernels (low-latency variant)
 namespace ep_kernels {
 struct gpu_nixl_ctx {
     uint64_t *local_counters; // [local_expert_id][src_rank]
@@ -142,5 +142,110 @@ void update_mask_buffer(int* mask_buffer_ptr, int rank_to_mask, bool mask, cudaS
 void clean_mask_buffer(int* mask_buffer_ptr, int num_ranks, cudaStream_t stream);
 
 } // namespace ep_kernels
+
+// Internode kernels - NIXL context and function declarations
+namespace internode {
+
+// New unified context structure - single set of handles per rank, channel_id passed to NIXL API
+struct gpu_nixl_ctx {
+    // Data transfer handles - indexed by [dest_rdma_rank]
+    nixlGpuXferReqH *data_request_handles;
+    nixlGpuXferReqH *remote_head_counter_handles;
+    
+    // Per-channel counters - indexed by [channel_id * num_rdma_ranks + rdma_rank]
+    uint64_t *local_head_counters;
+    uint64_t *local_tail_counters;
+    
+    // Barrier (shared across channels)
+    uint64_t *last_barrier_counter;
+    uint64_t *local_barrier_counter_ptr;
+    nixlGpuXferReqH *remote_barrier_handles;
+    
+    int num_channels;
+    int num_rdma_ranks;
+    int rank;
+
+    // Helper methods for counter access
+    __device__ inline uint64_t* local_head_counter_get(int channel_id, int rdma_rank) {
+        return &local_head_counters[channel_id * num_rdma_ranks + rdma_rank];
+    }
+
+    __device__ inline uint64_t* local_tail_counter_get(int channel_id, int rdma_rank) {
+        return &local_tail_counters[channel_id * num_rdma_ranks + rdma_rank];
+    }
+
+    // Helper methods for counter access - base pointer for a channel (for caching in hot loops)
+    __device__ inline uint64_t* local_head_counters_for_channel(int channel_id) {
+        return &local_head_counters[channel_id * num_rdma_ranks];
+    }
+
+    __device__ inline uint64_t* local_tail_counters_for_channel(int channel_id) {
+        return &local_tail_counters[channel_id * num_rdma_ranks];
+    }
+
+    __device__ inline nixlGpuXferReqH data_request_get(int rdma_rank) {
+        return data_request_handles[rdma_rank];
+    }
+
+    __device__ inline nixlGpuXferReqH head_counter_request_get(int rdma_rank) {
+        return remote_head_counter_handles[rdma_rank];
+    }
+
+    __device__ inline nixlGpuXferReqH remote_barrier_get(int rdma_rank) {
+        return remote_barrier_handles[rdma_rank];
+    }
+};
+
+int get_source_meta_bytes();
+
+void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, int num_ranks,
+                     const int* num_tokens_per_rdma_rank, int* moe_recv_rdma_counter_mapped,
+                     const int* num_tokens_per_expert, int* moe_recv_expert_counter_mapped, int num_experts,
+                     const bool* is_token_in_rank, int num_tokens, int num_channels,
+                     int hidden_int4, int num_scales, int num_topk, int expert_alignment,
+                     int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
+                     int* gbl_channel_prefix_matrix, int* recv_gbl_rank_prefix_sum,
+                     void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
+                     void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
+                     int** barrier_signal_ptrs, int rank,
+                     cudaStream_t stream, int64_t num_rdma_bytes, int64_t num_nvl_bytes,
+                     bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx);
+
+void dispatch(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
+              const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
+              int* send_rdma_head, int* send_nvl_head,
+              int* recv_rdma_channel_prefix_matrix, int* recv_gbl_channel_prefix_matrix,
+              const int* rdma_channel_prefix_matrix, const int* recv_rdma_rank_prefix_sum,
+              const int* gbl_channel_prefix_matrix, const int* recv_gbl_rank_prefix_sum,
+              const bool* is_token_in_rank,
+              int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,
+              int scale_token_stride, int scale_hidden_stride,
+              void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
+              void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
+              int rank, int num_ranks, bool is_cached_dispatch,
+              cudaStream_t stream, int num_channels, bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx);
+
+void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights,
+                   int num_ranks, int num_channels, int num_combined_tokens, int* combined_rdma_head,
+                   const int* rdma_channel_prefix_matrix, const int* rdma_rank_prefix_sum, int* combined_nvl_head,
+                   void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
+                   void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
+                   int** barrier_signal_ptrs, int rank, cudaStream_t stream,
+                   int64_t num_rdma_bytes, int64_t num_nvl_bytes,
+                   bool is_cached_dispatch, bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx);
+
+void combine(cudaDataType_t type,
+             void* combined_x, float* combined_topk_weights,
+             const bool* is_combined_token_in_rank,
+             const void* x, const float* topk_weights,
+             const void* bias_0, const void* bias_1,
+             const int* combined_rdma_head, const int* combined_nvl_head,
+             const void* src_meta, const int* rdma_channel_prefix_matrix, const int* rdma_rank_prefix_sum, const int* gbl_channel_prefix_matrix,
+             int num_tokens, int num_combined_tokens, int hidden, int num_topk,
+             void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
+             void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
+             int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx);
+
+} // namespace internode
 
 } // namespace nixl_ep
