@@ -5,7 +5,7 @@ import torch
 import torch.distributed as dist
 
 # noinspection PyUnresolvedReferences
-import deep_ep
+import nixl_ep
 from utils import init_dist, bench, bench_kineto, calc_diff, create_grouped_scores, inplace_unique, per_token_cast_to_fp8, per_token_cast_back
 
 # Test compatibility with low latency functions
@@ -15,7 +15,7 @@ import test_low_latency
 # noinspection PyShadowingNames
 def test_main(args: argparse.Namespace, num_sms: int,
               local_rank: int, num_local_ranks: int, num_ranks: int, num_nodes: int, rank: int,
-              buffer: deep_ep.Buffer, group: dist.ProcessGroup):
+              buffer: nixl_ep.Buffer, group: dist.ProcessGroup):
     # Settings
     num_tokens, hidden = args.num_tokens, args.hidden
     num_topk_groups, num_topk, num_experts = args.num_topk_groups, args.num_topk, args.num_experts
@@ -89,7 +89,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
 
     # Config
     rdma_buffer_size, nvl_buffer_size = 128, (720 if num_ranks in (144, 160) else 512)
-    config = deep_ep.Config(num_sms, 8, nvl_buffer_size, 16, rdma_buffer_size)
+    config = nixl_ep.Config(num_sms, 8, nvl_buffer_size, 16, rdma_buffer_size)
 
     # Test dispatch
     # noinspection PyShadowingNames
@@ -183,7 +183,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
         nvl_recv_bytes = (dispatch_bf16_nvl_recv_bytes * fp8_factor) if isinstance(current_x, tuple) else dispatch_bf16_nvl_recv_bytes
         for nvl_chunk_size in range(4, 45, 4):
             for rdma_chunk_size in range(4, 33, 4):
-                config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
+                config = nixl_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
                 tune_args = {'x': current_x, 'handle': handle, 'config': config}
                 t, notify_t = bench_kineto(lambda: buffer.dispatch(**tune_args), ('dispatch', 'notify'))
                 if t < best_time:
@@ -200,7 +200,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
             all_best_fp8_results_list = [torch.zeros_like(best_dispatch_results) for _ in range(torch.distributed.get_world_size())]
             dist.all_gather(all_best_fp8_results_list, best_dispatch_results, group=group)
             best_dispatch_results = all_best_fp8_results_list[0].tolist()
-    dispatch_config = deep_ep.Config(best_dispatch_results[0], best_dispatch_results[1], nvl_buffer_size, best_dispatch_results[2], rdma_buffer_size)
+    dispatch_config = nixl_ep.Config(best_dispatch_results[0], best_dispatch_results[1], nvl_buffer_size, best_dispatch_results[2], rdma_buffer_size)
 
     dispatch_args = {'x': x, 'num_tokens_per_rank': num_tokens_per_rank, 'num_tokens_per_rdma_rank': num_tokens_per_rdma_rank,
                      'is_token_in_rank': is_token_in_rank, 'num_tokens_per_expert': num_tokens_per_expert,
@@ -211,7 +211,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
     best_time, best_results = 1e10, None
     for nvl_chunk_size in range(1, 8, 1):
         for rdma_chunk_size in range(12 if num_nodes == 2 else 8, 33, 4):
-            config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
+            config = nixl_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
             tune_args = {'x': recv_x, 'handle': handle, 'config': config}
             t, notify_t = bench_kineto(lambda: buffer.combine(**tune_args), ('combine', 'notify'))
             if local_rank == 0:
@@ -240,7 +240,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_qps_per_rank = max(num_sms // 2, ll_num_experts // num_ranks if args.test_ll_compatibility else 0)
 
     # Initialize NIXL buffer
-    buffer = deep_ep.Buffer.nixl_buffer(rank=rank, low_latency_mode=False, explicitly_destroy=True, group=group)
+    buffer = nixl_ep.Buffer.nixl_buffer(rank=rank, low_latency_mode=False, explicitly_destroy=True, group=group)
     buffer.update_memory_buffers(num_ranks=num_ranks, num_experts_per_rank=num_qps_per_rank, num_nvl_bytes=int(2e9), num_rdma_bytes=int(1e9))
     buffer.connect_ranks([i for i in range(num_ranks) if i != rank])
 
