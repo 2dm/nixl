@@ -85,3 +85,22 @@ cfg.dynamicSmemBytes = smem_size;
         case 8192: case_macro(8192); \
         default: EP_HOST_ASSERT(false and "Unsupported hidden"); \
     } while (false)
+
+#define SWITCH_RDMA_RANKS(case_macro) \
+    switch (num_ranks / NUM_MAX_NVL_PEERS) { \
+        case 2: case_macro(2); \
+        case 4: case_macro(4); \
+        case 8: case_macro(8); \
+        case 16: case_macro(16); \
+        case 18: case_macro(18); \
+        case 20: case_macro(20); \
+        default: EP_HOST_ASSERT(false and "Unsupported RDMA ranks"); \
+    } while (false)
+
+#define SWITCH_RANKS_WITH_DTYPE(dtype, case_macro) \
+    switch (num_ranks) { \
+        case 2: case_macro(dtype, 2); \
+        case 4: case_macro(dtype, 4); \
+        case 8: case_macro(dtype, 8); \
+        default: EP_HOST_ASSERT(false and "Unsupported number of ranks"); \
+    } while (false)
