@@ -8,9 +8,6 @@ import torch.distributed as dist
 import nixl_ep
 from utils import init_dist, bench, bench_kineto, calc_diff, create_grouped_scores, inplace_unique, per_token_cast_to_fp8, per_token_cast_back
 
-# Test compatibility with low latency functions
-import test_low_latency
-
 
 # noinspection PyShadowingNames
 def test_main(args: argparse.Namespace, num_sms: int,
@@ -233,11 +230,9 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     num_nodes = int(os.getenv('WORLD_SIZE', 1))
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
-    if args.test_ll_compatibility:
-        ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
 
     num_sms = 24
-    num_qps_per_rank = max(num_sms // 2, ll_num_experts // num_ranks if args.test_ll_compatibility else 0)
+    num_qps_per_rank = num_sms // 2
 
     # Initialize NIXL buffer
     buffer = nixl_ep.Buffer.nixl_buffer(rank=rank, low_latency_mode=False, explicitly_destroy=True, group=group)
@@ -251,11 +246,6 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         test_main(args, i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group)
         if local_rank == 0:
             print('', flush=True)
-
-    # Test compatibility with low latency functions
-    if args.test_ll_compatibility:
-        buffer.clean_low_latency_buffer(ll_num_tokens, ll_hidden, ll_num_experts)
-        test_low_latency.test_main(ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk, rank, num_ranks, group, buffer, seed=1)
 
     # Destroy the buffer runtime and communication group
     buffer.destroy()
@@ -277,8 +267,6 @@ if __name__ == '__main__':
                        help='Number of top-k experts (default: 8)')
     parser.add_argument('--num-experts', type=int, default=256,
                        help='Number of experts (default: 256')
-    parser.add_argument('--test-ll-compatibility', action='store_true',
-                        help='whether to test compatibility with low-latency kernels')
     args = parser.parse_args()
 
     # Set default `num_topk_groups` if not provided
