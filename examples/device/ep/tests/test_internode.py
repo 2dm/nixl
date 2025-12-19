@@ -235,8 +235,8 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_qps_per_rank = num_sms // 2
 
     # Initialize NIXL buffer
-    buffer = nixl_ep.Buffer.nixl_buffer(rank=rank, low_latency_mode=False, explicitly_destroy=True, group=group)
-    buffer.update_memory_buffers(num_ranks=num_ranks, num_experts_per_rank=num_qps_per_rank, num_nvl_bytes=int(2e9), num_rdma_bytes=int(1e9))
+    buffer = nixl_ep.Buffer(rank=rank, explicitly_destroy=True, group=group)
+    buffer.update_memory_buffers(num_ranks=num_ranks, num_experts_per_rank=num_qps_per_rank, num_rdma_bytes=int(1e9))
     buffer.connect_ranks([i for i in range(num_ranks) if i != rank])
 
     assert num_local_ranks == 8 and num_ranks > 8
