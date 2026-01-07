@@ -223,8 +223,8 @@ def test_main(args: argparse.Namespace, num_sms: int,
 
 # noinspection PyUnboundLocalVariable,PyShadowingNames
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
-    pxb_nics_eos = ["mlx5_0", "mlx5_3", "mlx5_4", "mlx5_5", "mlx5_6", "mlx5_9", "mlx5_10", "mlx5_11"]
-    tcp_nics_eos = ',ibp154s0,ibp192s0,ibp206s0,ibp220s0,ibp94s0'
+    pxb_nics_eos = ["mlx5_0", "mlx5_1", "mlx5_2", "mlx5_4", "mlx5_5", "mlx5_6", "mlx5_7", "mlx5_8"]
+    tcp_nics_eos = ',ibp26s0,ibp44s0,ibp64s0,ibp101s0,ibp156s0,ibp173s0,ibp192s0,ibp227s0'
     os.environ['UCX_NET_DEVICES'] = f'cuda0-{pxb_nics_eos[local_rank]}:1' + tcp_nics_eos
     os.environ['CUDA_VISIBLE_DEVICES'] = str(local_rank)
 
