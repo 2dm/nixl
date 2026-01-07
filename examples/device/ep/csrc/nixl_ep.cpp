@@ -411,6 +411,73 @@ void Buffer::disconnect_ranks(const std::vector<int>& remote_ranks_list) {
     num_ranks = max_rank + 1;  // Sparse indexing maintained
 }
 
+std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, std::optional<EventHandle>>
+Buffer::get_dispatch_layout(const torch::Tensor& topk_idx, int num_experts,
+                            const std::optional<EventHandle>& previous_event,
+                            bool async_finish, bool allocate_on_comm_stream) {
+    EP_HOST_ASSERT(topk_idx.dim() == 2);
+    EP_HOST_ASSERT(topk_idx.is_contiguous());
+    EP_HOST_ASSERT(num_experts > 0);
+
+    // Allocate all tensors on comm stream if set
+    auto compute_stream = at::cuda::getCurrentCUDAStream();
+    if (allocate_on_comm_stream) {
+        EP_HOST_ASSERT(previous_event.has_value() and async_finish);
+        at::cuda::setCurrentCUDAStream(comm_stream);
+    }
+
+    // Wait previous tasks to be finished
+    if (previous_event.has_value()) {
+        stream_wait(comm_stream, previous_event.value());
+    } else {
+        stream_wait(comm_stream, compute_stream);
+    }
+
+    auto num_tokens = static_cast<int>(topk_idx.size(0)), num_topk = static_cast<int>(topk_idx.size(1));
+    auto num_tokens_per_rank = torch::empty({num_ranks}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+    auto num_tokens_per_rdma_rank = std::optional<torch::Tensor>();
+    auto num_tokens_per_expert = torch::empty({num_experts}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+    auto is_token_in_rank = torch::empty({num_tokens, num_ranks}, torch::dtype(torch::kBool).device(torch::kCUDA));
+    
+    // For internode mode, also compute RDMA rank statistics
+    int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
+    if (num_ranks > NUM_MAX_NVL_PEERS && num_ranks % NUM_MAX_NVL_PEERS == 0) {
+        num_tokens_per_rdma_rank = torch::empty({num_rdma_ranks}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+    }
+
+    layout::get_dispatch_layout(topk_idx.data_ptr<int64_t>(),
+                                num_tokens_per_rank.data_ptr<int>(),
+                                num_tokens_per_rdma_rank.has_value() ? num_tokens_per_rdma_rank.value().data_ptr<int>() : nullptr,
+                                num_tokens_per_expert.data_ptr<int>(),
+                                is_token_in_rank.data_ptr<bool>(),
+                                num_tokens, num_topk, num_ranks, num_experts,
+                                comm_stream);
+
+    // Wait streams
+    std::optional<EventHandle> event;
+    if (async_finish) {
+        event = EventHandle(comm_stream);
+        for (const auto& t: {topk_idx, num_tokens_per_rank, num_tokens_per_expert, is_token_in_rank}) {
+            t.record_stream(comm_stream);
+            if (allocate_on_comm_stream)
+                t.record_stream(compute_stream);
+        }
+        if (num_tokens_per_rdma_rank.has_value()) {
+            num_tokens_per_rdma_rank->record_stream(comm_stream);
+            if (allocate_on_comm_stream)
+                num_tokens_per_rdma_rank->record_stream(compute_stream);
+        }
+    } else {
+        stream_wait(compute_stream, comm_stream);
+    }
+
+    // Switch back compute stream
+    if (allocate_on_comm_stream)
+        at::cuda::setCurrentCUDAStream(compute_stream);
+
+    return {num_tokens_per_rank, num_tokens_per_rdma_rank, num_tokens_per_expert, is_token_in_rank, event};
+}
+
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
 Buffer::dispatch(const torch::Tensor& x, const torch::Tensor& topk_idx,
                              const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
@@ -1039,6 +1106,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("destroy", &nixl_ep::Buffer::destroy)
         .def("dispatch", &nixl_ep::Buffer::dispatch)
         .def("combine", &nixl_ep::Buffer::combine)
+        .def("get_dispatch_layout", &nixl_ep::Buffer::get_dispatch_layout)
         .def("update_mask_buffer", &nixl_ep::Buffer::update_mask_buffer)
         .def("query_mask_buffer", &nixl_ep::Buffer::query_mask_buffer)
         .def("clean_mask_buffer", &nixl_ep::Buffer::clean_mask_buffer)
