@@ -232,15 +232,23 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     os.environ['NIXL_ETCD_ENDPOINTS'] = args.etcd_server
 
     num_nodes = int(os.getenv('WORLD_SIZE', 1))
+    node_rank = int(os.getenv('RANK', 0))
+    print(f"[DEBUG] local_rank={local_rank}, node_rank={node_rank}, num_nodes={num_nodes}, MASTER_ADDR={os.getenv('MASTER_ADDR')}, ETCD={args.etcd_server}", flush=True)
+    
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
+    print(f"[DEBUG] After init_dist: rank={rank}, num_ranks={num_ranks}", flush=True)
 
     num_sms = 24
     num_qps_per_rank = num_sms // 2
 
     # Initialize NIXL buffer
+    print(f"[DEBUG] Creating buffer with rank={rank}", flush=True)
     buffer = nixl_ep.Buffer(rank=rank, explicitly_destroy=True, group=group)
+    print(f"[DEBUG] Updating memory buffers with num_ranks={num_ranks}, num_experts_per_rank={num_qps_per_rank}", flush=True)
     buffer.update_memory_buffers(num_ranks=num_ranks, num_experts_per_rank=num_qps_per_rank, num_rdma_bytes=int(1e9))
-    buffer.connect_ranks([i for i in range(num_ranks) if i != rank])
+    remote_ranks = [i for i in range(num_ranks) if i != rank]
+    print(f"[DEBUG] Connecting to remote_ranks={remote_ranks}", flush=True)
+    buffer.connect_ranks(remote_ranks)
 
     assert num_local_ranks == 8 and num_ranks > 8
     torch.manual_seed(rank)
