@@ -228,6 +228,9 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     os.environ['UCX_NET_DEVICES'] = f'cuda0-{pxb_nics_eos[local_rank]}:1' + tcp_nics_eos
     os.environ['CUDA_VISIBLE_DEVICES'] = str(local_rank)
 
+    # Initialize NIXL ETCD
+    os.environ['NIXL_ETCD_ENDPOINTS'] = args.etcd_server
+
     num_nodes = int(os.getenv('WORLD_SIZE', 1))
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
 
@@ -267,6 +270,8 @@ if __name__ == '__main__':
                        help='Number of top-k experts (default: 8)')
     parser.add_argument('--num-experts', type=int, default=256,
                        help='Number of experts (default: 256')
+    parser.add_argument('--etcd-server', type=str, default='http://127.0.0.1:2379',
+                       help='ETCD server address for NIXL (default: http://127.0.0.1:2379)')
     args = parser.parse_args()
 
     # Set default `num_topk_groups` if not provided
