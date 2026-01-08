@@ -99,12 +99,24 @@ struct nixl_ep_ctx {
 };
 
 struct Buffer {
+    EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS == 8, "The number of maximum NVLink peers must be 8");
+
 private:
     int buffer_idx = 0; // Double buffering index
+
+    // NVLink Buffer (for high-throughput internode)
+    int64_t num_nvl_bytes = 0;
+    void* buffer_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
+    void** buffer_ptrs_gpu = nullptr;
+    cudaIpcMemHandle_t ipc_handles[NUM_MAX_NVL_PEERS];
 
     // RDMA Buffer
     int64_t num_rdma_bytes;
     void* rdma_buffer_ptr = nullptr;
+
+    // Barrier signals (for high-throughput internode)
+    int* barrier_signal_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
+    int** barrier_signal_ptrs_gpu = nullptr;
 
     // Shrink mode buffer
     bool enable_shrink = false;
@@ -114,12 +126,20 @@ private:
     // Device info and communication
     int device_id;
     int num_device_sms;
-    int rank;
-    int num_ranks;
+    int rank, rdma_rank = 0, nvl_rank = 0;
+    int num_ranks, num_rdma_ranks = 1, num_nvl_ranks = 1;
     std::vector<int> remote_ranks; /* global ranks */
 
     // Stream for communication
     at::cuda::CUDAStream comm_stream;
+
+    // Host-side MoE counters (for high-throughput internode)
+    volatile int* moe_recv_counter = nullptr;
+    int* moe_recv_counter_mapped = nullptr;
+    volatile int* moe_recv_expert_counter = nullptr;
+    int* moe_recv_expert_counter_mapped = nullptr;
+    volatile int* moe_recv_rdma_counter = nullptr;
+    int* moe_recv_rdma_counter_mapped = nullptr;
 
     // After synchronization, this flag will be true
     bool available = false;
@@ -142,6 +162,11 @@ private:
     int env_num_channels;
     nixl_xfer_dlist_t dummy_src_dlist; // TODO: Remove once NIXL supports null src dlist for signals
     std::unique_ptr<nixl_ep_ctx> nixl_ctx = nullptr;
+    
+    // Internode NIXL context
+    internode::gpu_nixl_ctx internode_nixl_ctx = {};
+    uint64_t* last_barrier_counter = nullptr;
+    uint64_t* local_barrier_counter = nullptr;
 
     /* Common private funcs */
     void _nixl_agent_init();
@@ -169,13 +194,15 @@ private:
 public:
     Buffer(int rank, bool explicitly_destroy, bool enable_shrink);
 
-    void update_memory_buffers(int num_ranks, int64_t num_rdma_bytes);
+    void update_memory_buffers(int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes);
 
     void connect_ranks(const std::vector<int>& remote_ranks_list);
 
     void disconnect_ranks(const std::vector<int>& remote_ranks_list);
 
-    void init(int num_ranks, int64_t num_rdma_bytes);
+    void init(int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes);
+    
+    pybind11::bytearray get_local_ipc_handle() const;
 
     ~Buffer() noexcept(false);
 
