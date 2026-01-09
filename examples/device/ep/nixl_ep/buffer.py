@@ -19,6 +19,7 @@
 # limitations under the License.
 
 import os
+import time
 from typing import TYPE_CHECKING, Callable, List, Literal, Optional, Tuple, Union
 
 import torch
@@ -26,6 +27,13 @@ import torch.distributed as dist
 
 # noinspection PyUnresolvedReferences
 from . import nixl_ep_cpp
+
+# Debug flag - set to True to enable kernel debug prints
+_DEBUG_KERNELS = os.environ.get("NIXL_EP_DEBUG", "0") == "1"
+
+def _debug_print(msg: str):
+    if _DEBUG_KERNELS:
+        print(f"[KERNEL_DEBUG] {msg}", flush=True)
 
 # noinspection PyUnresolvedReferences
 from .nixl_ep_cpp import EventHandle
@@ -333,12 +341,14 @@ class Buffer:
             event: the event after executing the kernel (valid only if `async_finish` is set).
         """
         from . import Config
+        _debug_print(f"dispatch: entry, handle={handle is not None}, num_rdma_ranks={self.runtime.get_num_rdma_ranks()}")
         # Default config
         config = self.get_dispatch_config(self.group_size) if config is None else config
 
         # Internode (high-throughput)
         if self.runtime.get_num_rdma_ranks() > 1:
             assert num_worst_tokens == 0, 'Internode dispatch does not support `num_worst_tokens > 0`'
+            _debug_print("dispatch: calling internode_dispatch")
             return self.internode_dispatch(x, handle, num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
                                            topk_idx, topk_weights, expert_alignment, config, previous_event, async_finish, allocate_on_comm_stream)
 
@@ -361,10 +371,12 @@ class Buffer:
         Normally, you should not directly call this function.
         """
         assert config is not None
+        _debug_print(f"internode_dispatch: entry, cached={handle is not None}, x.shape={x.shape if not isinstance(x, tuple) else x[0].shape}")
 
         # Launch the kernel with cached or non-cached mode
         x, x_scales = x if isinstance(x, tuple) else (x, None)
         if handle is not None:
+            _debug_print("internode_dispatch: using cached handle")
             assert topk_idx is None and topk_weights is None
             is_token_in_rank, \
                 rdma_channel_prefix_matrix, gbl_channel_prefix_matrix, \
@@ -372,15 +384,21 @@ class Buffer:
                 recv_src_meta, send_rdma_head, send_nvl_head = handle
             num_recv_tokens = recv_src_meta.size(0)
             num_rdma_recv_tokens = send_nvl_head.size(0)
+            _debug_print(f"internode_dispatch: calling runtime.internode_dispatch (cached), num_recv_tokens={num_recv_tokens}")
+            t0 = time.time()
             recv_x, recv_x_scales, _, _, _, _, _, _, _, _, _, _, _, _, event = self.runtime.internode_dispatch(
                 x, x_scales, topk_idx, topk_weights,
                 None, None, is_token_in_rank, None,
                 num_recv_tokens, num_rdma_recv_tokens,
                 rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,
                 expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
+            _debug_print(f"internode_dispatch: runtime.internode_dispatch (cached) returned in {(time.time()-t0)*1000:.2f}ms")
             return (recv_x, recv_x_scales) if x_scales is not None else recv_x, None, None, None, None, EventOverlap(event)
         else:
+            _debug_print("internode_dispatch: computing new layout")
             assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
+            _debug_print(f"internode_dispatch: calling runtime.internode_dispatch (new)")
+            t0 = time.time()
             recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, \
                 rdma_channel_prefix_matrix, gbl_channel_prefix_matrix, \
                 recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, \
@@ -390,6 +408,7 @@ class Buffer:
                 num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
                 0, 0, None, None, None, None,
                 expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
+            _debug_print(f"internode_dispatch: runtime.internode_dispatch (new) returned in {(time.time()-t0)*1000:.2f}ms, recv_x.shape={recv_x.shape}")
             handle = (is_token_in_rank,
                       rdma_channel_prefix_matrix, gbl_channel_prefix_matrix,
                       recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,
@@ -532,11 +551,13 @@ class Buffer:
             event: the event after executing the kernel (valid only if `async_finish` is set).
         """
         from . import Config
+        _debug_print(f"combine: entry, x.shape={x.shape}, num_rdma_ranks={self.runtime.get_num_rdma_ranks()}")
         # Default config
         config = self.get_combine_config(self.group_size) if config is None else config
 
         # Internode (high-throughput)
         if self.runtime.get_num_rdma_ranks() > 1:
+            _debug_print("combine: calling internode_combine")
             return self.internode_combine(x, handle, topk_weights, bias, config, previous_event, async_finish, allocate_on_comm_stream)
 
         # For non-internode, raise error since we don't have intranode_combine
@@ -555,6 +576,7 @@ class Buffer:
         Normally, you should not directly call this function.
         """
         assert config is not None
+        _debug_print(f"internode_combine: entry, x.shape={x.shape}")
 
         # Unpack handle and bias
         is_combined_token_in_rank, \
@@ -564,12 +586,15 @@ class Buffer:
         bias_0, bias_1 = Buffer._unpack_bias(bias)
 
         # Launch the kernel
+        _debug_print(f"internode_combine: calling runtime.internode_combine")
+        t0 = time.time()
         combined_x, combined_topk_weights, event = self.runtime.internode_combine(
             x, topk_weights, bias_0, bias_1,
             src_meta, is_combined_token_in_rank,
             rdma_channel_prefix_matrix, rdma_rank_prefix_sum, gbl_channel_prefix_matrix,
             send_rdma_head, send_nvl_head, config, getattr(previous_event, 'event', None),
             async_finish, allocate_on_comm_stream)
+        _debug_print(f"internode_combine: runtime.internode_combine returned in {(time.time()-t0)*1000:.2f}ms")
         return combined_x, combined_topk_weights, EventOverlap(event)
 
     # noinspection PyTypeChecker

@@ -765,6 +765,13 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
     // Release GIL since CPU will busy-wait until GPU receives tensor size metadata from other ranks
     pybind11::gil_scoped_release release;
     HOST_LOG_DEBUG("internode_dispatch");
+    
+    // Debug print at entry
+    if (std::getenv("NIXL_EP_DEBUG") && std::string(std::getenv("NIXL_EP_DEBUG")) == "1") {
+        printf("[CPP_DEBUG][rank=%d] internode_dispatch: entry, cached=%d, x.size(0)=%ld, x.size(1)=%ld\n",
+               rank, cached_rdma_channel_prefix_matrix.has_value() ? 1 : 0, x.size(0), x.size(1));
+        fflush(stdout);
+    }
 
     const int num_channels = config.num_sms / 2;
     EP_HOST_ASSERT(config.num_sms % 2 == 0);
@@ -897,6 +904,11 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
         recv_gbl_rank_prefix_sum = torch::empty({num_ranks}, torch::dtype(torch::kInt32).device(torch::kCUDA));
 
         // Send sizes
+        if (std::getenv("NIXL_EP_DEBUG") && std::string(std::getenv("NIXL_EP_DEBUG")) == "1") {
+            printf("[CPP_DEBUG][rank=%d] internode_dispatch: calling notify_dispatch, num_tokens=%d, num_experts=%d\n",
+                   rank, num_tokens, num_experts);
+            fflush(stdout);
+        }
         *moe_recv_counter = -1;
         *moe_recv_rdma_counter = -1;
         for (int i = 0; i < num_local_experts; ++i)
@@ -913,6 +925,10 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                                    barrier_signal_ptrs_gpu, rank, comm_stream,
                                    config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
                                    num_nvl_bytes, false, internode_nixl_ctx);
+        if (std::getenv("NIXL_EP_DEBUG") && std::string(std::getenv("NIXL_EP_DEBUG")) == "1") {
+            printf("[CPP_DEBUG][rank=%d] internode_dispatch: notify_dispatch returned, entering CPU wait loop\n", rank);
+            fflush(stdout);
+        }
 
         // Synchronize total received tokens and tokens per expert
         auto start_time = std::chrono::high_resolution_clock::now();
@@ -931,10 +947,17 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
 
             // Timeout check
             if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() > NUM_CPU_TIMEOUT_SECS) {
+                printf("[CPP_DEBUG][rank=%d] TIMEOUT: moe_recv_counter=%d, moe_recv_rdma_counter=%d\n",
+                       rank, static_cast<int>(*moe_recv_counter), static_cast<int>(*moe_recv_rdma_counter));
                 for (int i = 0; i < num_local_experts; ++i)
                     printf("moe_recv_expert_counter[%d]: %d\n", i, moe_recv_expert_counter[i]);
                 throw std::runtime_error("NIXL_EP error: timeout (dispatch CPU)");
             }
+        }
+        if (std::getenv("NIXL_EP_DEBUG") && std::string(std::getenv("NIXL_EP_DEBUG")) == "1") {
+            printf("[CPP_DEBUG][rank=%d] internode_dispatch: CPU wait complete, num_recv_tokens=%d, num_rdma_recv_tokens=%d\n",
+                   rank, num_recv_tokens, num_rdma_recv_tokens);
+            fflush(stdout);
         }
         num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
     }
@@ -973,6 +996,10 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
     }
 
     // Launch data dispatch
+    if (std::getenv("NIXL_EP_DEBUG") && std::string(std::getenv("NIXL_EP_DEBUG")) == "1") {
+        printf("[CPP_DEBUG][rank=%d] internode_dispatch: calling internode::dispatch kernel\n", rank);
+        fflush(stdout);
+    }
     internode::dispatch(recv_x.data_ptr(), recv_x_scales_ptr, recv_topk_idx_ptr, recv_topk_weights_ptr,
                         cached_mode ? nullptr : recv_src_meta->data_ptr(),
                         x.data_ptr(), x_scales_ptr, topk_idx_ptr, topk_weights_ptr,
@@ -988,6 +1015,10 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                         buffer_ptrs_gpu, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens,
                         rank, num_ranks, cached_mode,
                         comm_stream, num_channels, false, internode_nixl_ctx);
+    if (std::getenv("NIXL_EP_DEBUG") && std::string(std::getenv("NIXL_EP_DEBUG")) == "1") {
+        printf("[CPP_DEBUG][rank=%d] internode_dispatch: internode::dispatch kernel launched\n", rank);
+        fflush(stdout);
+    }
 
     HOST_LOG_DEBUG("internode_dispatch finished");
 
@@ -1037,6 +1068,14 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
                           const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream) {
     const int num_channels = config.num_sms / 2;
     HOST_LOG_DEBUG("internode_combine | num_channels: %d", num_channels);
+    
+    // Debug print at entry
+    if (std::getenv("NIXL_EP_DEBUG") && std::string(std::getenv("NIXL_EP_DEBUG")) == "1") {
+        printf("[CPP_DEBUG][rank=%d] internode_combine: entry, x.size(0)=%ld, x.size(1)=%ld\n",
+               rank, x.size(0), x.size(1));
+        fflush(stdout);
+    }
+    
     EP_HOST_ASSERT(config.num_sms % 2 == 0);
 
     // Shape and contiguous checks
@@ -1116,6 +1155,11 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
     }
 
     // Launch data combine
+    if (std::getenv("NIXL_EP_DEBUG") && std::string(std::getenv("NIXL_EP_DEBUG")) == "1") {
+        printf("[CPP_DEBUG][rank=%d] internode_combine: calling internode::combine kernel, num_tokens=%d, num_combined_tokens=%d\n",
+               rank, num_tokens, num_combined_tokens);
+        fflush(stdout);
+    }
     auto combined_x = torch::empty({num_combined_tokens, hidden}, x.options());
     internode::combine(at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
                        combined_x.data_ptr(), combined_topk_weights_ptr,
@@ -1127,6 +1171,10 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
                        rdma_buffer_ptr, config.num_max_rdma_chunked_send_tokens, config.num_max_rdma_chunked_recv_tokens,
                        buffer_ptrs_gpu, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens,
                        rank, num_ranks, comm_stream, num_channels, false, internode_nixl_ctx);
+    if (std::getenv("NIXL_EP_DEBUG") && std::string(std::getenv("NIXL_EP_DEBUG")) == "1") {
+        printf("[CPP_DEBUG][rank=%d] internode_combine: internode::combine kernel launched\n", rank);
+        fflush(stdout);
+    }
 
     HOST_LOG_DEBUG("internode_combine finished");
 
