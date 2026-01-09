@@ -166,21 +166,28 @@ struct gpu_internode_ctx {
     int rank;
 
     // Helper methods for counter access
+    // Counter layout in counters_buffer_ptr:
+    // [ch0_head: num_rdma_ranks] [ch0_tail: num_rdma_ranks] [ch1_head: num_rdma_ranks] [ch1_tail: num_rdma_ranks] ...
+    // local_head_counters and local_tail_counters both point to counters_buffer_ptr base
     __device__ inline uint64_t* local_head_counter_get(int channel_id, int rdma_rank) {
-        return &local_head_counters[channel_id * num_rdma_ranks + rdma_rank];
+        // Head counter offset: 2 * channel_id * num_rdma_ranks + rdma_rank
+        return &local_head_counters[2 * channel_id * num_rdma_ranks + rdma_rank];
     }
 
     __device__ inline uint64_t* local_tail_counter_get(int channel_id, int rdma_rank) {
-        return &local_tail_counters[channel_id * num_rdma_ranks + rdma_rank];
+        // Tail counter offset: (2 * channel_id + 1) * num_rdma_ranks + rdma_rank
+        return &local_tail_counters[(2 * channel_id + 1) * num_rdma_ranks + rdma_rank];
     }
 
     // Helper methods for counter access - base pointer for a channel (for caching in hot loops)
     __device__ inline uint64_t* local_head_counters_for_channel(int channel_id) {
-        return &local_head_counters[channel_id * num_rdma_ranks];
+        // Head counters for channel start at offset 2 * channel_id * num_rdma_ranks
+        return &local_head_counters[2 * channel_id * num_rdma_ranks];
     }
 
     __device__ inline uint64_t* local_tail_counters_for_channel(int channel_id) {
-        return &local_tail_counters[channel_id * num_rdma_ranks];
+        // Tail counters for channel start at offset (2 * channel_id + 1) * num_rdma_ranks
+        return &local_tail_counters[(2 * channel_id + 1) * num_rdma_ranks];
     }
 
     __device__ inline nixlGpuXferReqH data_request_get(int rdma_rank) {

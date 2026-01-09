@@ -1414,6 +1414,9 @@ void Buffer::_nixl_internode_init() {
     // Initialize local counter pointers from our counters_buffer_ptr
     _nixl_internode_local_data_init();
     
+    // Set up remote counter and barrier transfer requests
+    _nixl_remote_counters_prepare();
+    
     // Set up batch transfer requests to other RDMA ranks
     _nixl_internode_batches_prepare();
     
@@ -1424,17 +1427,99 @@ void Buffer::_nixl_internode_init() {
 }
 
 void Buffer::_nixl_internode_local_data_init() {
-    // For internode mode, counters are laid out as:
+    // For internode mode, counters are laid out in counters_buffer_ptr as:
     // [channel_0_head_counters: num_rdma_ranks] [channel_0_tail_counters: num_rdma_ranks]
     // [channel_1_head_counters: num_rdma_ranks] [channel_1_tail_counters: num_rdma_ranks]
     // ...
-    // The nixl_internode_ctx constructor already allocated separate GPU arrays for
-    // local_head_counters and local_tail_counters, so we use those instead of 
-    // pointing into counters_buffer_ptr
+    // [last_barrier_counter] [local_barrier_counter]
+    
+    // In the flattened structure, local_head_counters and local_tail_counters both point
+    // to the base of counters_buffer_ptr. The accessor methods in gpu_internode_ctx use the
+    // correct offsets to access the right counter:
+    //   head: 2 * channel_id * num_rdma_ranks + rdma_rank
+    //   tail: (2 * channel_id + 1) * num_rdma_ranks + rdma_rank
+    
+    internode_ctx->gpu_internode_ctx.local_head_counters = counters_buffer_ptr;
+    internode_ctx->gpu_internode_ctx.local_tail_counters = counters_buffer_ptr;
+    
+    HOST_LOG_DEBUG("local_head_counters/local_tail_counters set to counters_buffer_ptr: %p", (void*)counters_buffer_ptr);
     
     // Set barrier counter pointers in GPU context
     internode_ctx->gpu_internode_ctx.last_barrier_counter = last_barrier_counter;
     internode_ctx->gpu_internode_ctx.local_barrier_counter_ptr = local_barrier_counter;
+    
+    HOST_LOG_DEBUG("last_barrier_counter: %p, local_barrier_counter_ptr: %p", 
+                  (void*)last_barrier_counter, (void*)local_barrier_counter);
+}
+
+void Buffer::_nixl_remote_counters_prepare() {
+    // Set up remote head counter signal handles and barrier handles for each RDMA rank
+    // In the flattened structure, handles are indexed by [rdma_rank], and channel_id is passed at transfer time
+    
+    for (int j = 0; j < num_rdma_ranks; ++j) {
+        if (j == rdma_rank) continue;
+        
+        int remote_rank = nvl_rank + j * NUM_MAX_NVL_PEERS;
+        
+        // Remote head counter - we signal remote's head counter when sending data
+        // Counter layout: [channel_0_head: num_rdma_ranks] [channel_0_tail: num_rdma_ranks] [channel_1_head: ...]
+        // For signaling, we write to remote's head counter at index [channel * 2 * num_rdma_ranks + rdma_rank]
+        // Since channel is dynamic, we use the base counters_buffer_ptr and offset at kernel time
+        // But for the signal handle, we need a valid destination - use first head counter slot
+        int remote_head_elem_offset = rdma_rank;  // Our rdma_rank in remote's counter array
+        uint64_t* remote_head_counter_ptr = nixl_peer_info[remote_rank].counters_buffer_ptr + remote_head_elem_offset;
+        
+        HOST_LOG_DEBUG("_nixl_remote_counters_prepare: rdma_rank %d, remote global rank %d, remote_head_counter_ptr=%p",
+                      j, remote_rank, (void*)remote_head_counter_ptr);
+        
+        nixl_opt_args_t eparams;
+        eparams.backends.push_back(nixl_agent_info->backend);
+        
+        // Create head counter signal handle
+        nixl_xfer_dlist_t counter_dst_dlist(VRAM_SEG);
+        counter_dst_dlist.addDesc(nixlBlobDesc((uintptr_t)remote_head_counter_ptr, sizeof(uint64_t), 
+                                               nixl_peer_info[remote_rank].device_id, ""));
+        
+        nixlXferReqH* counter_xfer_req = nullptr;
+        nixl_status_t status = nixl_agent_info->agent->createXferReq(
+            NIXL_WRITE, dummy_src_dlist, counter_dst_dlist,
+            nixl_agent_info->remote_agent_names[remote_rank], counter_xfer_req, &eparams);
+        
+        if (status != NIXL_SUCCESS) {
+            printf("[ERROR] _nixl_remote_counters_prepare: rank %d failed createXferReq for head counter to remote_rank %d, status=%d\n",
+                   rank, remote_rank, status);
+            fflush(stdout);
+        }
+        EP_HOST_ASSERT(status == NIXL_SUCCESS);
+        
+        internode_ctx->cpu_head_counter_reqs[j] = counter_xfer_req;
+        nixlGpuXferReqH counter_gpu_handle;
+        EP_HOST_ASSERT(nixl_agent_info->agent->createGpuXferReq(*counter_xfer_req, counter_gpu_handle) == NIXL_SUCCESS);
+        internode_ctx->cpu_head_counter_handles[j] = counter_gpu_handle;
+        
+        // Create barrier signal handle
+        // Barrier is written to remote's barrier_ptr
+        nixl_xfer_dlist_t barrier_dst_dlist(VRAM_SEG);
+        barrier_dst_dlist.addDesc(nixlBlobDesc((uintptr_t)nixl_peer_info[remote_rank].barrier_ptr, sizeof(uint64_t),
+                                               nixl_peer_info[remote_rank].device_id, ""));
+        
+        nixlXferReqH* barrier_xfer_req = nullptr;
+        status = nixl_agent_info->agent->createXferReq(
+            NIXL_WRITE, dummy_src_dlist, barrier_dst_dlist,
+            nixl_agent_info->remote_agent_names[remote_rank], barrier_xfer_req, &eparams);
+        
+        if (status != NIXL_SUCCESS) {
+            printf("[ERROR] _nixl_remote_counters_prepare: rank %d failed createXferReq for barrier to remote_rank %d, status=%d\n",
+                   rank, remote_rank, status);
+            fflush(stdout);
+        }
+        EP_HOST_ASSERT(status == NIXL_SUCCESS);
+        
+        internode_ctx->cpu_barrier_reqs[j] = barrier_xfer_req;
+        nixlGpuXferReqH barrier_gpu_handle;
+        EP_HOST_ASSERT(nixl_agent_info->agent->createGpuXferReq(*barrier_xfer_req, barrier_gpu_handle) == NIXL_SUCCESS);
+        internode_ctx->cpu_barrier_handles[j] = barrier_gpu_handle;
+    }
 }
 
 void Buffer::_nixl_internode_batches_prepare() {

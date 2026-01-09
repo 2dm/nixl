@@ -148,12 +148,13 @@ public:
         CUDA_CHECK(cudaMemset(gpu_internode_ctx.remote_head_counter_handles, 0, sizeof(nixlGpuXferReqH) * num_rdma_ranks));
         CUDA_CHECK(cudaMemset(gpu_internode_ctx.remote_barrier_handles, 0, sizeof(nixlGpuXferReqH) * num_rdma_ranks));
 
-        // Allocate counters (indexed by [channel_id * num_rdma_ranks + rdma_rank])
-        int num_counter_entries = num_channels * num_rdma_ranks;
-        CUDA_CHECK(cudaMalloc(&gpu_internode_ctx.local_head_counters, sizeof(uint64_t) * num_counter_entries));
-        CUDA_CHECK(cudaMalloc(&gpu_internode_ctx.local_tail_counters, sizeof(uint64_t) * num_counter_entries));
-        CUDA_CHECK(cudaMemset(gpu_internode_ctx.local_head_counters, 0, sizeof(uint64_t) * num_counter_entries));
-        CUDA_CHECK(cudaMemset(gpu_internode_ctx.local_tail_counters, 0, sizeof(uint64_t) * num_counter_entries));
+        // Note: local_head_counters, local_tail_counters, last_barrier_counter, and 
+        // local_barrier_counter_ptr are set in _nixl_internode_local_data_init() to point
+        // into the existing counters_buffer_ptr (not allocated here)
+        gpu_internode_ctx.local_head_counters = nullptr;
+        gpu_internode_ctx.local_tail_counters = nullptr;
+        gpu_internode_ctx.last_barrier_counter = nullptr;
+        gpu_internode_ctx.local_barrier_counter_ptr = nullptr;
 
         gpu_internode_ctx.num_channels = num_channels;
         gpu_internode_ctx.num_rdma_ranks = num_rdma_ranks;
@@ -161,11 +162,11 @@ public:
     }
 
     ~nixl_internode_ctx() noexcept(false) {
+        // Only free GPU memory that was allocated by this class (handles only)
+        // Counter pointers point into counters_buffer_ptr which is managed elsewhere
         if (gpu_internode_ctx.data_request_handles) CUDA_CHECK(cudaFree(gpu_internode_ctx.data_request_handles));
         if (gpu_internode_ctx.remote_head_counter_handles) CUDA_CHECK(cudaFree(gpu_internode_ctx.remote_head_counter_handles));
         if (gpu_internode_ctx.remote_barrier_handles) CUDA_CHECK(cudaFree(gpu_internode_ctx.remote_barrier_handles));
-        if (gpu_internode_ctx.local_head_counters) CUDA_CHECK(cudaFree(gpu_internode_ctx.local_head_counters));
-        if (gpu_internode_ctx.local_tail_counters) CUDA_CHECK(cudaFree(gpu_internode_ctx.local_tail_counters));
     }
 
     void copy_to_gpu() {
@@ -277,6 +278,7 @@ private:
     /* Internode mode private funcs */
     void _nixl_internode_init();
     void _nixl_internode_local_data_init();
+    void _nixl_remote_counters_prepare();
     void _nixl_internode_batches_prepare();
     void _nixl_internode_barrier_prepare();
 
