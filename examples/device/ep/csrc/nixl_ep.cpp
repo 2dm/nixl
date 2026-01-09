@@ -456,23 +456,26 @@ void Buffer::connect_ranks(const std::vector<int>& remote_ranks_list) {
         if (remote_rank == rank or std::find(remote_ranks.begin(), remote_ranks.end(), remote_rank) != remote_ranks.end())
             continue;
 
-        new_ranks.push_back(remote_rank);
-        CUDA_CHECK(cudaMemset(mask_buffer_ptr + remote_rank, 0, sizeof(int)));
-
-        if (enable_shrink) {
-            _nixl_ep_barrier_buffer_clear(remote_rank);
+        // For non-low-latency mode, only establish NIXL connections to ranks that have the same nvl_rank
+        if (low_latency_mode or remote_rank % NUM_MAX_NVL_PEERS == nvl_rank) {
+            new_ranks.push_back(remote_rank);
+            CUDA_CHECK(cudaMemset(mask_buffer_ptr + remote_rank, 0, sizeof(int)));
         }
     }
 
     if (new_ranks.empty())
         return;
+
+    if (low_latency_mode && enable_shrink) 
+        _nixl_ep_clear_sync_buffer();
+
     _nixl_agents_connect(new_ranks);
 
     _nixl_agents_peer_info_gather(new_ranks);
 
     _nixl_agents_wireup(new_ranks);
 
-    _nixl_ep_init(new_ranks);
+    low_latency_mode ? _nixl_ep_init(new_ranks) : _nixl_internode_init();
 
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -481,6 +484,7 @@ void Buffer::connect_ranks(const std::vector<int>& remote_ranks_list) {
 }
 
 void Buffer::disconnect_ranks(const std::vector<int>& remote_ranks_list) {
+    EP_HOST_ASSERT(low_latency_mode);  // disconnect only supported in low-latency mode
     EP_HOST_ASSERT(!remote_ranks_list.empty());
     EP_HOST_ASSERT(remote_ranks_list.size() <= remote_ranks.size());
 
@@ -1389,7 +1393,7 @@ void Buffer::_nixl_ep_context_init() {
 }
 
 void Buffer::_nixl_ep_clear_sync_buffer() {
-    CUDA_CHECK(cudaMemset(sync_buffer_ptr, 0, max_num_ranks * sizeof(int)));
+    CUDA_CHECK(cudaMemset(sync_buffer_ptr + rank, 0, sizeof(int)));
 }
 
 void Buffer::_nixl_ep_init(const std::vector<int>& ranks) {
@@ -1398,6 +1402,80 @@ void Buffer::_nixl_ep_init(const std::vector<int>& ranks) {
     _nixl_ep_batches_prepare(ranks);
     _nixl_ep_p2p_ptrs_prepare(ranks);
     _nixl_ep_gpu_ctx_update();
+}
+
+void Buffer::_nixl_internode_init() {
+    HOST_LOG_DEBUG("_nixl_internode_init: rank %d, num_rdma_ranks=%d, env_num_channels=%d", 
+                  rank, num_rdma_ranks, env_num_channels);
+    
+    // Create internode context - this allocates GPU memory for handles and counters
+    internode_ctx = std::make_unique<nixl_internode_ctx>(env_num_channels, num_rdma_ranks, rank);
+    
+    // Initialize local counter pointers from our counters_buffer_ptr
+    _nixl_internode_local_data_init();
+    
+    // Set up batch transfer requests to other RDMA ranks
+    _nixl_internode_batches_prepare();
+    
+    // Copy handles to GPU
+    internode_ctx->copy_to_gpu();
+    
+    HOST_LOG_DEBUG("_nixl_internode_init: rank %d completed", rank);
+}
+
+void Buffer::_nixl_internode_local_data_init() {
+    // For internode mode, counters are laid out as:
+    // [channel_0_head_counters: num_rdma_ranks] [channel_0_tail_counters: num_rdma_ranks]
+    // [channel_1_head_counters: num_rdma_ranks] [channel_1_tail_counters: num_rdma_ranks]
+    // ...
+    // The nixl_internode_ctx constructor already allocated separate GPU arrays for
+    // local_head_counters and local_tail_counters, so we use those instead of 
+    // pointing into counters_buffer_ptr
+    
+    // Set barrier counter pointers in GPU context
+    internode_ctx->gpu_internode_ctx.last_barrier_counter = last_barrier_counter;
+    internode_ctx->gpu_internode_ctx.local_barrier_counter_ptr = local_barrier_counter;
+}
+
+void Buffer::_nixl_internode_batches_prepare() {
+    // For each RDMA rank (except self), create transfer requests for data
+    for (int j = 0; j < num_rdma_ranks; ++j) {
+        if (j == rdma_rank) continue;
+        
+        int remote_rank = nvl_rank + j * NUM_MAX_NVL_PEERS;
+        HOST_LOG_DEBUG("_nixl_internode_batches_prepare: setting up batch for rdma_rank %d (global rank %d)", j, remote_rank);
+        
+        // Source: our RDMA buffer
+        nixl_xfer_dlist_t src_vram(VRAM_SEG);
+        src_vram.addDesc(nixlBlobDesc((uintptr_t)rdma_buffer_ptr, num_rdma_bytes, device_id, ""));
+        
+        // Destination: remote RDMA buffer
+        nixl_xfer_dlist_t dst_vram(VRAM_SEG);
+        dst_vram.addDesc(nixlBlobDesc((uintptr_t)(nixl_peer_info[remote_rank].rdma_buffer_ptr), 
+                                      num_rdma_bytes, nixl_peer_info[remote_rank].device_id, ""));
+        
+        nixl_opt_args_t extra_params;
+        extra_params.backends.push_back(nixl_agent_info->backend);
+        
+        nixlXferReqH* xfer_req = nullptr;
+        nixl_status_t status = nixl_agent_info->agent->createXferReq(
+            NIXL_WRITE, src_vram, dst_vram,
+            nixl_agent_info->remote_agent_names[remote_rank],
+            xfer_req, &extra_params);
+        
+        if (status != NIXL_SUCCESS) {
+            printf("[ERROR] _nixl_internode_batches_prepare: rank %d failed createXferReq to remote_rank %d, status=%d\n",
+                   rank, remote_rank, status);
+            fflush(stdout);
+        }
+        EP_HOST_ASSERT(status == NIXL_SUCCESS);
+        
+        internode_ctx->cpu_data_request_reqs[j] = xfer_req;
+        
+        nixlGpuXferReqH gpu_xfer_req;
+        EP_HOST_ASSERT(nixl_agent_info->agent->createGpuXferReq(*xfer_req, gpu_xfer_req) == NIXL_SUCCESS);
+        internode_ctx->cpu_data_request_handles[j] = gpu_xfer_req;
+    }
 }
 
 void Buffer::_nixl_agent_init() {
