@@ -326,6 +326,8 @@ void Buffer::barrier() {
 void Buffer::_nixl_agents_connect(const std::vector<int>& ranks) {
     EP_HOST_ASSERT(!ranks.empty());
 
+    HOST_LOG_DEBUG("_nixl_agents_connect: rank %d connecting to %zu remote ranks", rank, ranks.size());
+
     // Assuming ranks vector does not include current rank and has only new ranks
     remote_ranks.insert(remote_ranks.end(), ranks.begin(), ranks.end());
     for (int remote_rank : ranks) {
@@ -333,6 +335,7 @@ void Buffer::_nixl_agents_connect(const std::vector<int>& ranks) {
     }
 
     for (int remote_rank : ranks) {
+        HOST_LOG_DEBUG("_nixl_agents_connect: rank %d fetching remote MD for rank %d", rank, remote_rank);
         nixl_status_t fetch_status = nixl_agent_info->agent->fetchRemoteMD(nixl_agent_info->remote_agent_names[remote_rank]);
         if (fetch_status != NIXL_SUCCESS) {
             throw std::runtime_error("Failed to fetch metadata for remote agent " + std::to_string(remote_rank) +
@@ -341,19 +344,33 @@ void Buffer::_nixl_agents_connect(const std::vector<int>& ranks) {
 
         // Wait for remote metadata to be available
         nixl_xfer_dlist_t empty_descs(VRAM_SEG);
+        int wait_count = 0;
         while (nixl_agent_info->agent->checkRemoteMD(std::to_string(remote_rank), empty_descs) != NIXL_SUCCESS) {
             sleep_ms(10);
+            wait_count++;
+            if (wait_count % 100 == 0) {
+                HOST_LOG_DEBUG("_nixl_agents_connect: rank %d still waiting for remote MD from rank %d (waited %d ms)", 
+                              rank, remote_rank, wait_count * 10);
+            }
         }
+        HOST_LOG_DEBUG("_nixl_agents_connect: rank %d received remote MD from rank %d (after %d ms)", 
+                      rank, remote_rank, wait_count * 10);
     }
+    HOST_LOG_DEBUG("_nixl_agents_connect: rank %d finished connecting", rank);
 }
 
 void Buffer::_nixl_agents_peer_info_gather(std::vector<int>& ranks) {
+    HOST_LOG_DEBUG("_nixl_agents_peer_info_gather: rank %d sending peer info to %zu ranks", rank, ranks.size());
+    
     for (int remote_rank : ranks) {
         std::string my_peer_info_str(reinterpret_cast<const char*>(&my_peer_info), sizeof(NixlPeerInfo));
         nixl_agent_info->agent->genNotif(std::to_string(remote_rank), my_peer_info_str);
     }
 
+    HOST_LOG_DEBUG("_nixl_agents_peer_info_gather: rank %d waiting for peer info from remote ranks", rank);
+    
     for (int remote_rank : ranks) {
+        int wait_count = 0;
         do {
             nixl_notifs_t notif_map;
             nixl_agent_info->agent->getNotifs(notif_map);
@@ -363,25 +380,52 @@ void Buffer::_nixl_agents_peer_info_gather(std::vector<int>& ranks) {
                 memcpy(&remote_peer_info, my_peer_info_str.c_str(), sizeof(NixlPeerInfo));
                 nixl_peer_info[remote_peer_info.rank] = remote_peer_info;
                 nixl_agent_info->wire_up_done[remote_peer_info.rank] = true;
+                
+                HOST_LOG_DEBUG("_nixl_agents_peer_info_gather: rank %d received peer info from rank %d "
+                              "(counters_ptr=%p, rdma_ptr=%p, device=%d)",
+                              rank, remote_peer_info.rank,
+                              (void*)remote_peer_info.counters_buffer_ptr,
+                              (void*)remote_peer_info.rdma_buffer_ptr,
+                              remote_peer_info.device_id);
+            }
+            if (!nixl_agent_info->wire_up_done[remote_rank]) {
+                sleep_ms(10);
+                wait_count++;
             }
         } while (!nixl_agent_info->wire_up_done[remote_rank]);
     }
+    HOST_LOG_DEBUG("_nixl_agents_peer_info_gather: rank %d finished", rank);
 }
 
 // This is a workaround to NIXL/UCX wireup issue and should be removed once it is fixed
 void Buffer::_nixl_agents_wireup(std::vector<int>& ranks) {
+    HOST_LOG_DEBUG("_nixl_agents_wireup: rank %d starting wireup with %zu ranks", rank, ranks.size());
+    
     for (int remote_rank : ranks) {
+        HOST_LOG_DEBUG("_nixl_agents_wireup: rank %d -> remote_rank %d, wireup_ptr=%p, device_id=%d",
+                      rank, remote_rank,
+                      (void*)nixl_peer_info[remote_rank].wireup_ptr,
+                      nixl_peer_info[remote_rank].device_id);
+        
         nixl_opt_args_t wireup_params = {};
         wireup_params.backends.push_back(nixl_agent_info->backend);
 
         nixlXferReqH *wireup_req = nullptr;
         nixl_xfer_dlist_t dummy_dst_dlist(VRAM_SEG);
         dummy_dst_dlist.addDesc(nixlBlobDesc((uintptr_t)nixl_peer_info[remote_rank].wireup_ptr, sizeof(uint64_t), nixl_peer_info[remote_rank].device_id, ""));
-        EP_HOST_ASSERT(nixl_agent_info->agent->createXferReq(
+        
+        nixl_status_t status = nixl_agent_info->agent->createXferReq(
             NIXL_WRITE, dummy_src_dlist, dummy_dst_dlist,
-            nixl_agent_info->remote_agent_names[remote_rank], wireup_req, &wireup_params) == NIXL_SUCCESS);
+            nixl_agent_info->remote_agent_names[remote_rank], wireup_req, &wireup_params);
+        if (status != NIXL_SUCCESS) {
+            HOST_LOG_ERROR("_nixl_agents_wireup: rank %d failed createXferReq for wireup to remote_rank %d, "
+                          "wireup_ptr=%p, device_id=%d, status=%d",
+                          rank, remote_rank, (void*)nixl_peer_info[remote_rank].wireup_ptr,
+                          nixl_peer_info[remote_rank].device_id, status);
+        }
+        EP_HOST_ASSERT(status == NIXL_SUCCESS);
 
-        nixl_status_t status = nixl_agent_info->agent->postXferReq(wireup_req);
+        status = nixl_agent_info->agent->postXferReq(wireup_req);
         EP_HOST_ASSERT(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
 
         while ((status = nixl_agent_info->agent->getXferStatus(wireup_req)) == NIXL_IN_PROG) {
@@ -390,7 +434,10 @@ void Buffer::_nixl_agents_wireup(std::vector<int>& ranks) {
 
         EP_HOST_ASSERT(status == NIXL_SUCCESS);
         EP_HOST_ASSERT(nixl_agent_info->agent->releaseXferReq(wireup_req) == NIXL_SUCCESS);
+        
+        HOST_LOG_DEBUG("_nixl_agents_wireup: rank %d completed wireup with remote_rank %d", rank, remote_rank);
     }
+    HOST_LOG_DEBUG("_nixl_agents_wireup: rank %d finished", rank);
 }
 
 void Buffer::_nixl_ep_barrier_buffer_clear(int rank) {
@@ -1353,6 +1400,8 @@ void Buffer::_nixl_ep_init(const std::vector<int>& ranks) {
 }
 
 void Buffer::_nixl_agent_init() {
+    HOST_LOG_DEBUG("_nixl_agent_init: rank %d starting agent initialization", rank);
+    
     std::string agent_name = std::to_string(rank);
     nixlAgentConfig cfg(true, false, 0,
                         nixl_thread_sync_t::NIXL_THREAD_SYNC_RW, 1, 0, 100000, false, NIXL_ETCD_WATCH_TIMEOUT);
@@ -1383,21 +1432,29 @@ void Buffer::_nixl_agent_init() {
     nixl_agent_info->extra_params.backends.push_back(ucx_backend);
     nixl_agent_info->agent_name = agent_name;
 
+    HOST_LOG_DEBUG("_nixl_agent_init: rank %d registering memory buffers", rank);
+
     /* Register RDMA buffer */
     nixl_reg_dlist_t rdma_ptr_dlist(VRAM_SEG);
     rdma_ptr_dlist.addDesc(nixlBlobDesc((uintptr_t)(rdma_buffer_ptr), num_rdma_bytes, get_local_device_id(), ""));
     EP_HOST_ASSERT(agent->registerMem(rdma_ptr_dlist) == NIXL_SUCCESS);
+    HOST_LOG_DEBUG("_nixl_agent_init: rank %d registered RDMA buffer: ptr=%p, size=%lu", 
+                  rank, (void*)rdma_buffer_ptr, num_rdma_bytes);
 
     /* Register counters buffer */
     nixl_reg_dlist_t counters_dlist(VRAM_SEG);
     counters_dlist.addDesc(nixlBlobDesc((uintptr_t)(counters_buffer_ptr), num_counters * sizeof(uint64_t), get_local_device_id(), ""));
     EP_HOST_ASSERT(agent->registerMem(counters_dlist) == NIXL_SUCCESS);
+    HOST_LOG_DEBUG("_nixl_agent_init: rank %d registered counters buffer: ptr=%p, size=%lu", 
+                  rank, (void*)counters_buffer_ptr, num_counters * sizeof(uint64_t));
 
     /* Register sync buffer */
     if (sync_buffer_ptr) {
         nixl_reg_dlist_t sync_dlist(VRAM_SEG);
         sync_dlist.addDesc(nixlBlobDesc((uintptr_t)(sync_buffer_ptr), max_num_ranks * sizeof(int), get_local_device_id(), ""));
         EP_HOST_ASSERT(agent->registerMem(sync_dlist) == NIXL_SUCCESS);
+        HOST_LOG_DEBUG("_nixl_agent_init: rank %d registered sync buffer: ptr=%p, size=%lu", 
+                      rank, (void*)sync_buffer_ptr, max_num_ranks * sizeof(int));
     }
 
     size_t signal_size = 0;
@@ -1409,13 +1466,17 @@ void Buffer::_nixl_agent_init() {
     nixl_reg_dlist_t wireup_dlist(VRAM_SEG);
     wireup_dlist.addDesc(nixlBlobDesc((uintptr_t)(wireup_buffer_ptr), sizeof(uint64_t), get_local_device_id(), ""));
     EP_HOST_ASSERT(agent->registerMem(wireup_dlist) == NIXL_SUCCESS);
+    HOST_LOG_DEBUG("_nixl_agent_init: rank %d registered wireup buffer: ptr=%p", 
+                  rank, (void*)wireup_buffer_ptr);
 
     // Send local metadata
+    HOST_LOG_DEBUG("_nixl_agent_init: rank %d sending local metadata to ETCD", rank);
     status = nixl_agent_info->agent->sendLocalMD();
     if (status != NIXL_SUCCESS) {
         throw std::runtime_error("Failed to send local metadata for agent " +
                                 nixl_agent_info->agent_name + ", status: " + std::to_string(status));
     }
+    HOST_LOG_DEBUG("_nixl_agent_init: rank %d completed agent initialization", rank);
 }
 
 void Buffer::_nixl_ep_batches_prepare(const std::vector<int>& ranks) {
@@ -1462,9 +1523,17 @@ void Buffer::_nixl_ep_p2p_ptrs_prepare(const std::vector<int>& ranks) {
 
 void Buffer::_nixl_ep_counters_prepare(const std::vector<int>& ranks) {
     int num_local_experts = env_num_channels;
+    HOST_LOG_DEBUG("_nixl_ep_counters_prepare: rank %d preparing counters for %zu remote ranks", rank, ranks.size());
+    
     for (int remote_rank : ranks) {
         if (remote_rank == rank)
             continue;
+        
+        HOST_LOG_DEBUG("_nixl_ep_counters_prepare: rank %d -> remote_rank %d, counters_buffer_ptr=%p, device_id=%d",
+                      rank, remote_rank, 
+                      (void*)nixl_peer_info[remote_rank].counters_buffer_ptr,
+                      nixl_peer_info[remote_rank].device_id);
+        
         EP_HOST_ASSERT(nixl_peer_info[remote_rank].counters_buffer_ptr != nullptr && "[ERROR] _nixl_ep_counters_prepare: nixl_peer_info.counters_buffer_ptr is NULL!");
 
         // Fetch the first counter (double buffering)
@@ -1473,16 +1542,33 @@ void Buffer::_nixl_ep_counters_prepare(const std::vector<int>& ranks) {
         eparams.backends.push_back(nixl_agent_info->backend);
         nixl_xfer_dlist_t dst_dlist(VRAM_SEG);
         dst_dlist.addDesc(nixlBlobDesc((uintptr_t)remote_counter_addr, sizeof(uint64_t), nixl_peer_info[remote_rank].device_id, ""));
-        EP_HOST_ASSERT(nixl_agent_info->agent->createXferReq(NIXL_WRITE, dummy_src_dlist, dst_dlist, nixl_agent_info->remote_agent_names[remote_rank], ep_ctx->cpu_remote_counter_reqs_0[remote_rank], &eparams) == NIXL_SUCCESS);
+        
+        nixl_status_t status = nixl_agent_info->agent->createXferReq(NIXL_WRITE, dummy_src_dlist, dst_dlist, nixl_agent_info->remote_agent_names[remote_rank], ep_ctx->cpu_remote_counter_reqs_0[remote_rank], &eparams);
+        if (status != NIXL_SUCCESS) {
+            HOST_LOG_ERROR("_nixl_ep_counters_prepare: rank %d failed createXferReq for counter_0 to remote_rank %d, "
+                          "remote_addr=%p, device_id=%d, status=%d",
+                          rank, remote_rank, (void*)remote_counter_addr, 
+                          nixl_peer_info[remote_rank].device_id, status);
+        }
+        EP_HOST_ASSERT(status == NIXL_SUCCESS);
         EP_HOST_ASSERT(nixl_agent_info->agent->createGpuXferReq(*ep_ctx->cpu_remote_counter_reqs_0[remote_rank], ep_ctx->gpu_remote_counter_reqs_0[remote_rank]) == NIXL_SUCCESS);
 
         // Fetch the second counter (double buffering)
         remote_counter_addr += max_num_ranks * num_local_experts;
         nixl_xfer_dlist_t dst_dlist_2(VRAM_SEG);
         dst_dlist_2.addDesc(nixlBlobDesc((uintptr_t)remote_counter_addr, sizeof(uint64_t), nixl_peer_info[remote_rank].device_id, ""));
-        EP_HOST_ASSERT(nixl_agent_info->agent->createXferReq(NIXL_WRITE, dummy_src_dlist, dst_dlist_2, nixl_agent_info->remote_agent_names[remote_rank], ep_ctx->cpu_remote_counter_reqs_1[remote_rank], &eparams) == NIXL_SUCCESS);
+        
+        status = nixl_agent_info->agent->createXferReq(NIXL_WRITE, dummy_src_dlist, dst_dlist_2, nixl_agent_info->remote_agent_names[remote_rank], ep_ctx->cpu_remote_counter_reqs_1[remote_rank], &eparams);
+        if (status != NIXL_SUCCESS) {
+            HOST_LOG_ERROR("_nixl_ep_counters_prepare: rank %d failed createXferReq for counter_1 to remote_rank %d, "
+                          "remote_addr=%p, device_id=%d, status=%d",
+                          rank, remote_rank, (void*)remote_counter_addr, 
+                          nixl_peer_info[remote_rank].device_id, status);
+        }
+        EP_HOST_ASSERT(status == NIXL_SUCCESS);
         EP_HOST_ASSERT(nixl_agent_info->agent->createGpuXferReq(*ep_ctx->cpu_remote_counter_reqs_1[remote_rank], ep_ctx->gpu_remote_counter_reqs_1[remote_rank]) == NIXL_SUCCESS);
     }
+    HOST_LOG_DEBUG("_nixl_ep_counters_prepare: rank %d finished", rank);
 }
 
 void Buffer::_nixl_agents_disconnect(const std::vector<int>& ranks) {
