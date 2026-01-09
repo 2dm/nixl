@@ -341,14 +341,15 @@ class Buffer:
             event: the event after executing the kernel (valid only if `async_finish` is set).
         """
         from . import Config
-        _debug_print(f"dispatch: entry, handle={handle is not None}, num_rdma_ranks={self.runtime.get_num_rdma_ranks()}")
+        # Always print for debugging stuck dispatch
+        print(f"[PY_DEBUG][rank={self.rank}] dispatch: ENTRY, handle={handle is not None}, num_rdma_ranks={self.runtime.get_num_rdma_ranks()}", flush=True)
         # Default config
         config = self.get_dispatch_config(self.group_size) if config is None else config
 
         # Internode (high-throughput)
         if self.runtime.get_num_rdma_ranks() > 1:
             assert num_worst_tokens == 0, 'Internode dispatch does not support `num_worst_tokens > 0`'
-            _debug_print("dispatch: calling internode_dispatch")
+            print(f"[PY_DEBUG][rank={self.rank}] dispatch: calling internode_dispatch", flush=True)
             return self.internode_dispatch(x, handle, num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
                                            topk_idx, topk_weights, expert_alignment, config, previous_event, async_finish, allocate_on_comm_stream)
 
@@ -371,12 +372,14 @@ class Buffer:
         Normally, you should not directly call this function.
         """
         assert config is not None
-        _debug_print(f"internode_dispatch: entry, cached={handle is not None}, x.shape={x.shape if not isinstance(x, tuple) else x[0].shape}")
+        # Always print for debugging stuck dispatch
+        print(f"[PY_DEBUG][rank={self.rank}] internode_dispatch: ENTRY, cached={handle is not None}, x.shape={x.shape if not isinstance(x, tuple) else x[0].shape}", flush=True)
+        print(f"[PY_DEBUG][rank={self.rank}] internode_dispatch: num_rdma_ranks={self.runtime.get_num_rdma_ranks()}, group_size={self.group_size}", flush=True)
 
         # Launch the kernel with cached or non-cached mode
         x, x_scales = x if isinstance(x, tuple) else (x, None)
         if handle is not None:
-            _debug_print("internode_dispatch: using cached handle")
+            print(f"[PY_DEBUG][rank={self.rank}] internode_dispatch: using cached handle", flush=True)
             assert topk_idx is None and topk_weights is None
             is_token_in_rank, \
                 rdma_channel_prefix_matrix, gbl_channel_prefix_matrix, \
@@ -395,9 +398,11 @@ class Buffer:
             _debug_print(f"internode_dispatch: runtime.internode_dispatch (cached) returned in {(time.time()-t0)*1000:.2f}ms")
             return (recv_x, recv_x_scales) if x_scales is not None else recv_x, None, None, None, None, EventOverlap(event)
         else:
-            _debug_print("internode_dispatch: computing new layout")
+            print(f"[PY_DEBUG][rank={self.rank}] internode_dispatch: computing new layout", flush=True)
             assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
-            _debug_print(f"internode_dispatch: calling runtime.internode_dispatch (new)")
+            print(f"[PY_DEBUG][rank={self.rank}] internode_dispatch: num_tokens_per_rank.shape={num_tokens_per_rank.shape}, num_tokens_per_expert.shape={num_tokens_per_expert.shape}", flush=True)
+            print(f"[PY_DEBUG][rank={self.rank}] internode_dispatch: num_tokens_per_rdma_rank={num_tokens_per_rdma_rank.shape if num_tokens_per_rdma_rank is not None else None}", flush=True)
+            print(f"[PY_DEBUG][rank={self.rank}] internode_dispatch: calling runtime.internode_dispatch (new)...", flush=True)
             t0 = time.time()
             recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, \
                 rdma_channel_prefix_matrix, gbl_channel_prefix_matrix, \
@@ -408,7 +413,7 @@ class Buffer:
                 num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
                 0, 0, None, None, None, None,
                 expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
-            _debug_print(f"internode_dispatch: runtime.internode_dispatch (new) returned in {(time.time()-t0)*1000:.2f}ms, recv_x.shape={recv_x.shape}")
+            print(f"[PY_DEBUG][rank={self.rank}] internode_dispatch: runtime.internode_dispatch (new) returned in {(time.time()-t0)*1000:.2f}ms, recv_x.shape={recv_x.shape}", flush=True)
             handle = (is_token_in_rank,
                       rdma_channel_prefix_matrix, gbl_channel_prefix_matrix,
                       recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,

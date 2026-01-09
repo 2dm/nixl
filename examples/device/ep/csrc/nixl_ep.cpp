@@ -766,12 +766,12 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
     pybind11::gil_scoped_release release;
     HOST_LOG_DEBUG("internode_dispatch");
     
-    // Debug print at entry
-    if (std::getenv("NIXL_EP_DEBUG") && std::string(std::getenv("NIXL_EP_DEBUG")) == "1") {
-        printf("[CPP_DEBUG][rank=%d] internode_dispatch: entry, cached=%d, x.size(0)=%ld, x.size(1)=%ld\n",
-               rank, cached_rdma_channel_prefix_matrix.has_value() ? 1 : 0, x.size(0), x.size(1));
-        fflush(stdout);
-    }
+    // Always print entry debug (for debugging stuck dispatch)
+    printf("[CPP_DEBUG][rank=%d] internode_dispatch: ENTRY, cached=%d, x.size(0)=%ld, x.size(1)=%ld\n",
+           rank, cached_rdma_channel_prefix_matrix.has_value() ? 1 : 0, x.size(0), x.size(1));
+    printf("[CPP_DEBUG][rank=%d] internode_dispatch: num_rdma_ranks=%d, num_ranks=%d, rdma_buffer_ptr=%p, num_nvl_bytes=%ld\n",
+           rank, num_rdma_ranks, num_ranks, rdma_buffer_ptr, num_nvl_bytes);
+    fflush(stdout);
 
     const int num_channels = config.num_sms / 2;
     EP_HOST_ASSERT(config.num_sms % 2 == 0);
@@ -904,11 +904,11 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
         recv_gbl_rank_prefix_sum = torch::empty({num_ranks}, torch::dtype(torch::kInt32).device(torch::kCUDA));
 
         // Send sizes
-        if (std::getenv("NIXL_EP_DEBUG") && std::string(std::getenv("NIXL_EP_DEBUG")) == "1") {
-            printf("[CPP_DEBUG][rank=%d] internode_dispatch: calling notify_dispatch, num_tokens=%d, num_experts=%d\n",
-                   rank, num_tokens, num_experts);
-            fflush(stdout);
-        }
+        printf("[CPP_DEBUG][rank=%d] internode_dispatch: calling notify_dispatch, num_tokens=%d, num_experts=%d, num_local_experts=%d\n",
+               rank, num_tokens, num_experts, num_local_experts);
+        printf("[CPP_DEBUG][rank=%d] internode_dispatch: buffer_ptrs_gpu=%p, barrier_signal_ptrs_gpu=%p, moe_recv_counter_mapped=%p\n",
+               rank, buffer_ptrs_gpu, barrier_signal_ptrs_gpu, moe_recv_counter_mapped);
+        fflush(stdout);
         *moe_recv_counter = -1;
         *moe_recv_rdma_counter = -1;
         for (int i = 0; i < num_local_experts; ++i)
@@ -925,13 +925,12 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                                    barrier_signal_ptrs_gpu, rank, comm_stream,
                                    config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
                                    num_nvl_bytes, false, internode_nixl_ctx);
-        if (std::getenv("NIXL_EP_DEBUG") && std::string(std::getenv("NIXL_EP_DEBUG")) == "1") {
-            printf("[CPP_DEBUG][rank=%d] internode_dispatch: notify_dispatch returned, entering CPU wait loop\n", rank);
-            fflush(stdout);
-        }
+        printf("[CPP_DEBUG][rank=%d] internode_dispatch: notify_dispatch returned, entering CPU wait loop\n", rank);
+        fflush(stdout);
 
         // Synchronize total received tokens and tokens per expert
         auto start_time = std::chrono::high_resolution_clock::now();
+        int wait_iter = 0;
         while (true) {
             // Read total count
             num_recv_tokens = static_cast<int>(*moe_recv_counter);
@@ -945,20 +944,30 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
             if (ready)
                 break;
 
+            // Progress print every 5 seconds
+            wait_iter++;
+            auto elapsed_secs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count();
+            if (elapsed_secs > 0 && elapsed_secs % 5 == 0 && wait_iter % 1000000 == 0) {
+                printf("[CPP_DEBUG][rank=%d] CPU wait progress: elapsed=%lds, moe_recv_counter=%d, moe_recv_rdma_counter=%d\n",
+                       rank, elapsed_secs, static_cast<int>(*moe_recv_counter), static_cast<int>(*moe_recv_rdma_counter));
+                for (int i = 0; i < num_local_experts; ++i)
+                    printf("[CPP_DEBUG][rank=%d]   moe_recv_expert_counter[%d]: %d\n", rank, i, moe_recv_expert_counter[i]);
+                fflush(stdout);
+            }
+
             // Timeout check
-            if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() > NUM_CPU_TIMEOUT_SECS) {
-                printf("[CPP_DEBUG][rank=%d] TIMEOUT: moe_recv_counter=%d, moe_recv_rdma_counter=%d\n",
-                       rank, static_cast<int>(*moe_recv_counter), static_cast<int>(*moe_recv_rdma_counter));
+            if (elapsed_secs > NUM_CPU_TIMEOUT_SECS) {
+                printf("[CPP_DEBUG][rank=%d] TIMEOUT after %lds: moe_recv_counter=%d, moe_recv_rdma_counter=%d\n",
+                       rank, elapsed_secs, static_cast<int>(*moe_recv_counter), static_cast<int>(*moe_recv_rdma_counter));
                 for (int i = 0; i < num_local_experts; ++i)
                     printf("moe_recv_expert_counter[%d]: %d\n", i, moe_recv_expert_counter[i]);
+                fflush(stdout);
                 throw std::runtime_error("NIXL_EP error: timeout (dispatch CPU)");
             }
         }
-        if (std::getenv("NIXL_EP_DEBUG") && std::string(std::getenv("NIXL_EP_DEBUG")) == "1") {
-            printf("[CPP_DEBUG][rank=%d] internode_dispatch: CPU wait complete, num_recv_tokens=%d, num_rdma_recv_tokens=%d\n",
-                   rank, num_recv_tokens, num_rdma_recv_tokens);
-            fflush(stdout);
-        }
+        printf("[CPP_DEBUG][rank=%d] internode_dispatch: CPU wait complete, num_recv_tokens=%d, num_rdma_recv_tokens=%d\n",
+               rank, num_recv_tokens, num_rdma_recv_tokens);
+        fflush(stdout);
         num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
     }
 
