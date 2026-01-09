@@ -61,7 +61,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
          int num_tokens, int num_max_dispatch_tokens_per_rank,
          int num_topk, int num_experts, int rank, int num_ranks,
          int num_warp_groups, int num_warps_per_group,
-         bool round_scale, int phases, ep_kernels::gpu_nixl_ctx nixl_ctx) {
+         bool round_scale, int phases, ep_kernels::gpu_ep_ctx nixl_ctx) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
     const auto warp_id = thread_id / 32, lane_id = get_lane_id();
@@ -381,7 +381,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int num_topk, int num_experts, int rank, int num_ranks,
               bool use_fp8, bool round_scale, bool use_ue8m0,
               void* workspace, int num_device_sms,
-              cudaStream_t stream, int phases, ep_kernels::gpu_nixl_ctx nixl_ctx) {
+              cudaStream_t stream, int phases, ep_kernels::gpu_ep_ctx nixl_ctx) {
     constexpr int kNumMaxTopK = 11;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -601,7 +601,7 @@ combine(void* combined_x,
         int num_max_dispatch_tokens_per_rank,
         int num_experts, int rank, int num_ranks,
         int num_warp_groups, int num_warps_per_group,
-        int phases, bool zero_copy, ep_kernels::gpu_nixl_ctx nixl_ctx) {
+        int phases, bool zero_copy, ep_kernels::gpu_ep_ctx nixl_ctx) {
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
     const auto thread_id = static_cast<int>(threadIdx.x);
@@ -995,7 +995,7 @@ void combine(void* combined_x,
              int num_topk, int num_experts, int rank, int num_ranks,
              bool use_logfmt,
              void* workspace, int num_device_sms,
-             cudaStream_t stream, int phases, bool zero_copy, ep_kernels::gpu_nixl_ctx nixl_ctx) {
+             cudaStream_t stream, int phases, bool zero_copy, ep_kernels::gpu_ep_ctx nixl_ctx) {
     constexpr int kNumMaxTopk = 11;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -1108,7 +1108,7 @@ void clean_mask_buffer(int* mask_buffer_ptr, int num_ranks, cudaStream_t stream)
 // Device function version of barrier - can be called from within a kernel
 template <int kNumThreads>
 __device__ void barrier_device(int thread_id, int rank, int num_ranks, 
-                               int* mask_buffer_ptr, int* sync_buffer_ptr, ep_kernels::gpu_nixl_ctx nixl_ctx) {
+                               int* mask_buffer_ptr, int* sync_buffer_ptr, ep_kernels::gpu_ep_ctx nixl_ctx) {
     EP_DEVICE_ASSERT(kNumThreads >= num_ranks);
     if (thread_id == 0) atomicAdd(sync_buffer_ptr + rank, -1);
     __syncthreads();
@@ -1145,11 +1145,11 @@ __device__ void barrier_device(int thread_id, int rank, int num_ranks,
 // Global kernel wrapper for barrier - used when launching barrier as a standalone kernel
 template <int kNumThreads>
 __global__ void barrier_kernel(int thread_id, int rank, int num_ranks, 
-                               int* mask_buffer_ptr, int* sync_buffer_ptr, ep_kernels::gpu_nixl_ctx nixl_ctx) {
+                               int* mask_buffer_ptr, int* sync_buffer_ptr, ep_kernels::gpu_ep_ctx nixl_ctx) {
     barrier_device<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr, nixl_ctx);
 }
 
-void barrier(ep_kernels::gpu_nixl_ctx nixl_ctx, int* mask_buffer_ptr, int* sync_buffer_ptr, cudaStream_t stream) {
+void barrier(ep_kernels::gpu_ep_ctx nixl_ctx, int* mask_buffer_ptr, int* sync_buffer_ptr, cudaStream_t stream) {
     constexpr int kNumThreads = 32;
     SETUP_LAUNCH_CONFIG(1, kNumThreads, stream);
     LAUNCH_KERNEL(&cfg, barrier_kernel<kNumThreads>, 0, nixl_ctx.rank, nixl_ctx.num_ranks, mask_buffer_ptr, sync_buffer_ptr, nixl_ctx);
@@ -1159,7 +1159,7 @@ template <int kNumThreads> __launch_bounds__(kNumThreads, 1)
 __global__ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
                                          int* clean_1, int num_clean_int_1,
                                          int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr,
-                                         ep_kernels::gpu_nixl_ctx nixl_ctx) {
+                                         ep_kernels::gpu_ep_ctx nixl_ctx) {
     auto thread_id = static_cast<int>(threadIdx.x);
 
     // Barrier before cleaning (in case of unfinished chunked EP)
@@ -1180,7 +1180,7 @@ __global__ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
 void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
                               int* clean_1, int num_clean_int_1,
                               int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr,
-                              ep_kernels::gpu_nixl_ctx nixl_ctx, cudaStream_t stream) {
+                              ep_kernels::gpu_ep_ctx nixl_ctx, cudaStream_t stream) {
     constexpr int kNumThreads = 256;
 
     SETUP_LAUNCH_CONFIG(1, kNumThreads, stream);

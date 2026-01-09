@@ -61,6 +61,7 @@ class Buffer:
         nvlink_backend: Literal["nixl", "ipc", "none"] = "nixl",
         explicitly_destroy: bool = False,
         rank: int = 0,
+        low_latency_mode: bool = False,
         enable_shrink: bool = False,
         group: Optional[dist.ProcessGroup] = None,
         comm: Optional["mpi4py.MPI.Comm"] = None,
@@ -74,12 +75,15 @@ class Buffer:
                 otherwise, the resources will be released by the destructor.
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
             rank: the rank number.
+            low_latency_mode: If True, use low-latency mode; otherwise, use high-throughput internode mode.
+            enable_shrink: If True, enable shrink mode for elastic training.
             group: the communication group (optional).
             comm: the mpi4py.MPI.Comm communicator to use in case the group parameter is absent (optional).
         """
         self.rank = rank
         self.group_size = 0  # Will be updated by `update_memory_buffers`
         self.explicitly_destroy = explicitly_destroy
+        self.low_latency_mode = low_latency_mode
         self.group = group
         self.comm = comm
         assert not (group and comm)
@@ -91,7 +95,7 @@ class Buffer:
         if nvlink_backend != "nixl":
             os.environ["UCX_TLS"] = "^cuda_ipc"
 
-        self.runtime = nixl_ep_cpp.Buffer(self.rank, explicitly_destroy, enable_shrink)
+        self.runtime = nixl_ep_cpp.Buffer(self.rank, low_latency_mode, explicitly_destroy, enable_shrink)
 
     def destroy(self):
         """

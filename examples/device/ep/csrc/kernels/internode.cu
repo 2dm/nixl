@@ -78,7 +78,7 @@ __forceinline__ __device__ int translate_dst_rdma_rank(const int dst_rdma_rank, 
     return kLowLatencyMode ? (dst_rdma_rank * NUM_MAX_NVL_PEERS + nvl_rank) : dst_rdma_rank;
 }
 
-__forceinline__ __device__ void nixl_barrier(internode::gpu_nixl_ctx nixl_ctx, bool use_all_channels = false) {
+__forceinline__ __device__ void nixl_barrier(internode::gpu_internode_ctx nixl_ctx, bool use_all_channels = false) {
     int rdma_rank = nixl_ctx.rank / NUM_MAX_NVL_PEERS;
     uint64_t poll_counter = 0;
 
@@ -119,7 +119,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
                 int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
                 int* gbl_channel_prefix_matrix, int* recv_gbl_rank_prefix_sum,
                 void* rdma_buffer_ptr,
-                void** buffer_ptrs, int** barrier_signal_ptrs, int rank, internode::gpu_nixl_ctx nixl_ctx) {
+                void** buffer_ptrs, int** barrier_signal_ptrs, int rank, internode::gpu_internode_ctx nixl_ctx) {
     auto sm_id = static_cast<int>(blockIdx.x);
     auto thread_id = static_cast<int>(threadIdx.x), warp_id = thread_id / 32, lane_id = get_lane_id();
     auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / 32;
@@ -355,7 +355,7 @@ void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
                      void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
                      int** barrier_signal_ptrs, int rank,
                      cudaStream_t stream, int64_t num_rdma_bytes, int64_t num_nvl_bytes,
-                     bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx) {
+                     bool low_latency_mode, internode::gpu_internode_ctx nixl_ctx) {
 #define NOTIFY_DISPATCH_LAUNCH_CASE(num_rdma_ranks) { \
     auto notify_dispatch_func = low_latency_mode ? \
         notify_dispatch<true, num_rdma_ranks> : notify_dispatch<false, num_rdma_ranks>; \
@@ -408,7 +408,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
          int scale_token_stride, int scale_hidden_stride,
          void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
          void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
-         int rank, int num_ranks, internode::gpu_nixl_ctx nixl_ctx) {
+         int rank, int num_ranks, internode::gpu_internode_ctx nixl_ctx) {
     enum class WarpRole {
         kRDMASender,
         kRDMASenderCoordinator,
@@ -1200,7 +1200,7 @@ void dispatch(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
               void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
               void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
               int rank, int num_ranks, bool is_cached_dispatch,
-              cudaStream_t stream, int num_channels, bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx) {
+              cudaStream_t stream, int num_channels, bool low_latency_mode, internode::gpu_internode_ctx nixl_ctx) {
     constexpr int kNumDispatchRDMASenderWarps = 7;
     constexpr int kNumTMABytesPerWarp = 16384;
     constexpr int smem_size = kNumTMABytesPerWarp * NUM_MAX_NVL_PEERS;
@@ -1244,7 +1244,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
                               const int* rdma_channel_prefix_matrix, const int* rdma_rank_prefix_sum, int* combined_nvl_head,
                               void* rdma_buffer_ptr,
                               void** buffer_ptrs, int** barrier_signal_ptrs, int rank, int num_ranks,
-                              bool is_cached_dispatch, internode::gpu_nixl_ctx nixl_ctx) {
+                              bool is_cached_dispatch, internode::gpu_internode_ctx nixl_ctx) {
     auto sm_id = static_cast<int>(blockIdx.x);
     auto thread_id = static_cast<int>(threadIdx.x);
     auto num_threads = static_cast<int>(blockDim.x);
@@ -1391,7 +1391,7 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
                    void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
                    int** barrier_signal_ptrs, int rank, cudaStream_t stream,
                    int64_t num_rdma_bytes, int64_t num_nvl_bytes,
-                   bool is_cached_dispatch, bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx) {
+                   bool is_cached_dispatch, bool low_latency_mode, internode::gpu_internode_ctx nixl_ctx) {
     const int num_threads = std::max(128, 32 * num_channels);
     const int num_warps = num_threads / 32;
     const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
@@ -1575,7 +1575,7 @@ combine(int4* combined_x, float* combined_topk_weights,
         int num_tokens, int num_combined_tokens, int hidden, int num_topk,
         void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
         void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
-        int rank, int num_ranks, internode::gpu_nixl_ctx nixl_ctx) {
+        int rank, int num_ranks, internode::gpu_internode_ctx nixl_ctx) {
     enum class WarpRole {
         kNVLSender,
         kNVLAndRDMAForwarder,
@@ -2086,7 +2086,7 @@ void combine(cudaDataType_t type,
              int num_tokens, int num_combined_tokens, int hidden, int num_topk,
              void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
              void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
-             int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx) {
+             int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode, internode::gpu_internode_ctx nixl_ctx) {
     constexpr int kNumCombineForwarderWarps = 24;
     constexpr int kNumTMABytesPerSenderWarp = 16384;
     constexpr int kNumTMABytesPerForwarderWarp = 9248;

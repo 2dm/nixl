@@ -92,19 +92,102 @@ struct nixl_ep_ctx {
     std::vector<nixlGpuXferReqH> gpu_batch_reqs; // [num_peers]
     std::vector<nixlXferReqH*> cpu_barrier_reqs; // [num_peers]
     std::vector<nixlGpuXferReqH> gpu_barrier_reqs; // [num_peers]
-
     std::vector<void *> rdma_p2p_ptrs; // [num_ranks]
     std::vector<uint64_t *> counters_p2p_ptrs; // [num_ranks]
-    ep_kernels::gpu_nixl_ctx gpu[2]; // Double buffering
+    ep_kernels::gpu_ep_ctx gpu_ep_ctx[2]; // Double buffering
+
+    ~nixl_ep_ctx() noexcept(false) {
+        // Free GPU memory allocated in _nixl_ep_gpu_ctx_update
+        if (gpu_ep_ctx[0].remote_counter_reqs) CUDA_CHECK(cudaFree(gpu_ep_ctx[0].remote_counter_reqs));
+        if (gpu_ep_ctx[1].remote_counter_reqs) CUDA_CHECK(cudaFree(gpu_ep_ctx[1].remote_counter_reqs));
+        if (gpu_ep_ctx[0].batch_reqs) CUDA_CHECK(cudaFree(gpu_ep_ctx[0].batch_reqs));
+        // gpu_ep_ctx[1].batch_reqs shares pointer with [0], don't double-free
+        if (gpu_ep_ctx[0].remote_barrier_reqs) CUDA_CHECK(cudaFree(gpu_ep_ctx[0].remote_barrier_reqs));
+        // gpu_ep_ctx[1].remote_barrier_reqs shares pointer with [0], don't double-free
+        if (gpu_ep_ctx[0].counters_p2p_ptrs) CUDA_CHECK(cudaFree(gpu_ep_ctx[0].counters_p2p_ptrs));
+        if (gpu_ep_ctx[1].counters_p2p_ptrs) CUDA_CHECK(cudaFree(gpu_ep_ctx[1].counters_p2p_ptrs));
+        if (gpu_ep_ctx[0].rdma_p2p_ptrs) CUDA_CHECK(cudaFree(gpu_ep_ctx[0].rdma_p2p_ptrs));
+        if (gpu_ep_ctx[1].rdma_p2p_ptrs) CUDA_CHECK(cudaFree(gpu_ep_ctx[1].rdma_p2p_ptrs));
+    }
+};
+
+/// @brief nixl_internode_ctx manages the GPU context for high-throughput internode communication
+class nixl_internode_ctx {
+public:
+    internode::gpu_internode_ctx gpu_internode_ctx;
+    
+    // CPU-side storage for handles that will be copied to GPU arrays
+    std::vector<nixlXferReqH*> cpu_data_request_reqs;           // [num_rdma_ranks]
+    std::vector<nixlGpuXferReqH> cpu_data_request_handles;      // [num_rdma_ranks]
+    std::vector<nixlXferReqH*> cpu_head_counter_reqs;           // [num_rdma_ranks]
+    std::vector<nixlGpuXferReqH> cpu_head_counter_handles;      // [num_rdma_ranks]
+    std::vector<nixlXferReqH*> cpu_barrier_reqs;                // [num_rdma_ranks]
+    std::vector<nixlGpuXferReqH> cpu_barrier_handles;           // [num_rdma_ranks]
+    
+    int num_rdma_ranks = 0;
+    int num_channels = 0;
+    int rank = 0;
+
+    nixl_internode_ctx(int num_channels = 0, int num_rdma_ranks = 0, int rank = 0)
+        : num_channels(num_channels), num_rdma_ranks(num_rdma_ranks), rank(rank) {
+        // Initialize CPU-side vectors
+        cpu_data_request_reqs.resize(num_rdma_ranks, nullptr);
+        cpu_data_request_handles.resize(num_rdma_ranks, nullptr);
+        cpu_head_counter_reqs.resize(num_rdma_ranks, nullptr);
+        cpu_head_counter_handles.resize(num_rdma_ranks, nullptr);
+        cpu_barrier_reqs.resize(num_rdma_ranks, nullptr);
+        cpu_barrier_handles.resize(num_rdma_ranks, nullptr);
+
+        // Allocate GPU arrays for handles
+        CUDA_CHECK(cudaMalloc(&gpu_internode_ctx.data_request_handles, sizeof(nixlGpuXferReqH) * num_rdma_ranks));
+        CUDA_CHECK(cudaMalloc(&gpu_internode_ctx.remote_head_counter_handles, sizeof(nixlGpuXferReqH) * num_rdma_ranks));
+        CUDA_CHECK(cudaMalloc(&gpu_internode_ctx.remote_barrier_handles, sizeof(nixlGpuXferReqH) * num_rdma_ranks));
+        
+        // Initialize to zeros
+        CUDA_CHECK(cudaMemset(gpu_internode_ctx.data_request_handles, 0, sizeof(nixlGpuXferReqH) * num_rdma_ranks));
+        CUDA_CHECK(cudaMemset(gpu_internode_ctx.remote_head_counter_handles, 0, sizeof(nixlGpuXferReqH) * num_rdma_ranks));
+        CUDA_CHECK(cudaMemset(gpu_internode_ctx.remote_barrier_handles, 0, sizeof(nixlGpuXferReqH) * num_rdma_ranks));
+
+        // Allocate counters (indexed by [channel_id * num_rdma_ranks + rdma_rank])
+        int num_counter_entries = num_channels * num_rdma_ranks;
+        CUDA_CHECK(cudaMalloc(&gpu_internode_ctx.local_head_counters, sizeof(uint64_t) * num_counter_entries));
+        CUDA_CHECK(cudaMalloc(&gpu_internode_ctx.local_tail_counters, sizeof(uint64_t) * num_counter_entries));
+        CUDA_CHECK(cudaMemset(gpu_internode_ctx.local_head_counters, 0, sizeof(uint64_t) * num_counter_entries));
+        CUDA_CHECK(cudaMemset(gpu_internode_ctx.local_tail_counters, 0, sizeof(uint64_t) * num_counter_entries));
+
+        gpu_internode_ctx.num_channels = num_channels;
+        gpu_internode_ctx.num_rdma_ranks = num_rdma_ranks;
+        gpu_internode_ctx.rank = rank;
+    }
+
+    ~nixl_internode_ctx() noexcept(false) {
+        if (gpu_internode_ctx.data_request_handles) CUDA_CHECK(cudaFree(gpu_internode_ctx.data_request_handles));
+        if (gpu_internode_ctx.remote_head_counter_handles) CUDA_CHECK(cudaFree(gpu_internode_ctx.remote_head_counter_handles));
+        if (gpu_internode_ctx.remote_barrier_handles) CUDA_CHECK(cudaFree(gpu_internode_ctx.remote_barrier_handles));
+        if (gpu_internode_ctx.local_head_counters) CUDA_CHECK(cudaFree(gpu_internode_ctx.local_head_counters));
+        if (gpu_internode_ctx.local_tail_counters) CUDA_CHECK(cudaFree(gpu_internode_ctx.local_tail_counters));
+    }
+
+    void copy_to_gpu() {
+        // Copy handles from CPU vectors to GPU arrays
+        CUDA_CHECK(cudaMemcpy(gpu_internode_ctx.data_request_handles, cpu_data_request_handles.data(),
+                              sizeof(nixlGpuXferReqH) * num_rdma_ranks, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(gpu_internode_ctx.remote_head_counter_handles, cpu_head_counter_handles.data(),
+                              sizeof(nixlGpuXferReqH) * num_rdma_ranks, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(gpu_internode_ctx.remote_barrier_handles, cpu_barrier_handles.data(),
+                              sizeof(nixlGpuXferReqH) * num_rdma_ranks, cudaMemcpyHostToDevice));
+    }
 };
 
 struct Buffer {
     EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS == 8, "The number of maximum NVLink peers must be 8");
 
 private:
-    int buffer_idx = 0; // Double buffering index
+    // Low-latency mode buffer
+    int buffer_idx = 0;
+    bool low_latency_mode = false;
 
-    // NVLink Buffer (for high-throughput internode)
+    // NVLink Buffer
     int64_t num_nvl_bytes = 0;
     void* buffer_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
     void** buffer_ptrs_gpu = nullptr;
@@ -160,13 +243,12 @@ private:
     uint64_t num_counters;
     uint64_t max_num_ranks;
     int env_num_channels;
-    nixl_xfer_dlist_t dummy_src_dlist; // TODO: Remove once NIXL supports null src dlist for signals
-    std::unique_ptr<nixl_ep_ctx> nixl_ctx = nullptr;
-    
-    // Internode NIXL context
-    internode::gpu_nixl_ctx internode_nixl_ctx = {};
     uint64_t* last_barrier_counter = nullptr;
     uint64_t* local_barrier_counter = nullptr;
+    nixl_xfer_dlist_t dummy_src_dlist; // TODO: Remove once NIXL supports null src dlist for signals
+
+    std::unique_ptr<nixl_internode_ctx> internode_ctx = nullptr;
+    std::unique_ptr<nixl_ep_ctx> ep_ctx = nullptr;
 
     /* Common private funcs */
     void _nixl_agent_init();
@@ -176,9 +258,10 @@ private:
     void _nixl_agents_peer_info_cleanup(const std::vector<int>& ranks);
     void _nixl_agents_wireup(std::vector<int>& ranks);
 
-    /* NIXL EP private funcs */
+    /* NIXL EP (low-latency mode) private funcs */
     void _nixl_ep_init(const std::vector<int>& ranks);
     void _nixl_ep_context_init();
+    void _nixl_ep_clear_sync_buffer();
     void _nixl_ep_counters_prepare(const std::vector<int>& ranks);
     void _nixl_ep_batches_prepare(const std::vector<int>& ranks);
     void _nixl_ep_p2p_ptrs_prepare(const std::vector<int>& ranks);
@@ -191,8 +274,14 @@ private:
     void _nixl_ep_p2p_ptrs_cleanup(const std::vector<int>& ranks_to_remove);
     void _nixl_ep_barrier_buffer_clear(int rank);
 
+    /* Internode mode private funcs */
+    void _nixl_internode_init();
+    void _nixl_internode_local_data_init();
+    void _nixl_internode_batches_prepare();
+    void _nixl_internode_barrier_prepare();
+
 public:
-    Buffer(int rank, bool explicitly_destroy, bool enable_shrink);
+    Buffer(int rank, bool low_latency_mode, bool explicitly_destroy, bool enable_shrink);
 
     void update_memory_buffers(int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes);
 

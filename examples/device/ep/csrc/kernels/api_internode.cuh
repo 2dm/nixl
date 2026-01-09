@@ -90,7 +90,7 @@ void combine(cudaDataType_t type,
 namespace internode {
 #ifdef NIXL_DEEPEP
 // New unified context structure - single set of handles per rank, channel_id passed to NIXL API
-struct gpu_nixl_ctx {
+struct gpu_internode_ctx {
     // Data transfer handles - indexed by [dest_rdma_rank]
     nixlGpuXferReqH *data_request_handles;
     nixlGpuXferReqH *remote_head_counter_handles;
@@ -145,7 +145,7 @@ void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
                      int** barrier_signal_ptrs, int rank,
                      cudaStream_t stream, int64_t num_rdma_bytes, int64_t num_nvl_bytes,
 #ifdef NIXL_DEEPEP
-                     bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx);
+                     bool low_latency_mode, internode::gpu_internode_ctx nixl_ctx);
 #else
                      bool low_latency_mode);
 #endif
@@ -163,7 +163,7 @@ void dispatch(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
               void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
               int rank, int num_ranks, bool is_cached_dispatch,
 #ifdef NIXL_DEEPEP
-              cudaStream_t stream, int num_channels, bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx);
+              cudaStream_t stream, int num_channels, bool low_latency_mode, internode::gpu_internode_ctx nixl_ctx);
 #else
               cudaStream_t stream, int num_channels, bool low_latency_mode);
 #endif
@@ -176,7 +176,7 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
                    int** barrier_signal_ptrs, int rank, cudaStream_t stream,
                    int64_t num_rdma_bytes, int64_t num_nvl_bytes,
 #ifdef NIXL_DEEPEP
-                   bool is_cached_dispatch, bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx);
+                   bool is_cached_dispatch, bool low_latency_mode, internode::gpu_internode_ctx nixl_ctx);
 #else
                    bool is_cached_dispatch, bool low_latency_mode);
 #endif
@@ -192,7 +192,7 @@ void combine(cudaDataType_t type,
              void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
              void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
 #ifdef NIXL_DEEPEP
-             int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode, internode::gpu_nixl_ctx nixl_ctx);
+             int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode, internode::gpu_internode_ctx nixl_ctx);
 #else
              int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode);
 #endif
@@ -201,7 +201,7 @@ void combine(cudaDataType_t type,
 // Internode low-latency kernels
 namespace internode_ll {
 #ifdef NIXL_DEEPEP
-struct gpu_nixl_ctx {
+struct gpu_ep_ctx {
     uint64_t *local_counters; // [local_expert_id][src_rank]
     uint64_t *clean_counters; // Counters to be cleaned for the next iteration
     nixlGpuXferReqH *remote_counter_reqs; // [local_expert_id,dest_rank]
@@ -264,7 +264,7 @@ struct gpu_nixl_ctx {
     }
 };
 
-void barrier(int* mask_buffer_ptr, int* sync_buffer_ptr, internode_ll::gpu_nixl_ctx nixl_ctx, cudaStream_t stream);
+void barrier(int* mask_buffer_ptr, int* sync_buffer_ptr, internode_ll::gpu_ep_ctx nixl_ctx, cudaStream_t stream);
 
 #endif
 
@@ -287,7 +287,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               bool use_fp8, bool round_scale, bool use_ue8m0,
               void* workspace, int num_device_sms,
 #ifdef NIXL_DEEPEP
-              cudaStream_t stream, int phases, internode_ll::gpu_nixl_ctx nixl_ctx);
+              cudaStream_t stream, int phases, internode_ll::gpu_ep_ctx nixl_ctx);
 #else
               cudaStream_t stream, int phases);
 #endif
@@ -304,7 +304,7 @@ void combine(void* combined_x,
              bool use_logfmt,
              void* workspace, int num_device_sms,
 #ifdef NIXL_DEEPEP
-             cudaStream_t stream, int phases, bool zero_copy, internode_ll::gpu_nixl_ctx nixl_ctx);
+             cudaStream_t stream, int phases, bool zero_copy, internode_ll::gpu_ep_ctx nixl_ctx);
 #else
              cudaStream_t stream, int phases, bool zero_copy);
 #endif
