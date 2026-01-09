@@ -418,10 +418,11 @@ void Buffer::_nixl_agents_wireup(std::vector<int>& ranks) {
             NIXL_WRITE, dummy_src_dlist, dummy_dst_dlist,
             nixl_agent_info->remote_agent_names[remote_rank], wireup_req, &wireup_params);
         if (status != NIXL_SUCCESS) {
-            HOST_LOG_ERROR("_nixl_agents_wireup: rank %d failed createXferReq for wireup to remote_rank %d, "
-                          "wireup_ptr=%p, device_id=%d, status=%d",
-                          rank, remote_rank, (void*)nixl_peer_info[remote_rank].wireup_ptr,
-                          nixl_peer_info[remote_rank].device_id, status);
+            printf("[ERROR] _nixl_agents_wireup: rank %d failed createXferReq for wireup to remote_rank %d, "
+                   "wireup_ptr=%p, device_id=%d, status=%d\n",
+                   rank, remote_rank, (void*)nixl_peer_info[remote_rank].wireup_ptr,
+                   nixl_peer_info[remote_rank].device_id, status);
+            fflush(stdout);
         }
         EP_HOST_ASSERT(status == NIXL_SUCCESS);
 
@@ -1545,10 +1546,11 @@ void Buffer::_nixl_ep_counters_prepare(const std::vector<int>& ranks) {
         
         nixl_status_t status = nixl_agent_info->agent->createXferReq(NIXL_WRITE, dummy_src_dlist, dst_dlist, nixl_agent_info->remote_agent_names[remote_rank], ep_ctx->cpu_remote_counter_reqs_0[remote_rank], &eparams);
         if (status != NIXL_SUCCESS) {
-            HOST_LOG_ERROR("_nixl_ep_counters_prepare: rank %d failed createXferReq for counter_0 to remote_rank %d, "
-                          "remote_addr=%p, device_id=%d, status=%d",
-                          rank, remote_rank, (void*)remote_counter_addr, 
-                          nixl_peer_info[remote_rank].device_id, status);
+            printf("[ERROR] _nixl_ep_counters_prepare: rank %d failed createXferReq for counter_0 to remote_rank %d, "
+                   "remote_addr=%p, device_id=%d, status=%d\n",
+                   rank, remote_rank, (void*)remote_counter_addr, 
+                   nixl_peer_info[remote_rank].device_id, status);
+            fflush(stdout);
         }
         EP_HOST_ASSERT(status == NIXL_SUCCESS);
         EP_HOST_ASSERT(nixl_agent_info->agent->createGpuXferReq(*ep_ctx->cpu_remote_counter_reqs_0[remote_rank], ep_ctx->gpu_remote_counter_reqs_0[remote_rank]) == NIXL_SUCCESS);
@@ -1560,10 +1562,11 @@ void Buffer::_nixl_ep_counters_prepare(const std::vector<int>& ranks) {
         
         status = nixl_agent_info->agent->createXferReq(NIXL_WRITE, dummy_src_dlist, dst_dlist_2, nixl_agent_info->remote_agent_names[remote_rank], ep_ctx->cpu_remote_counter_reqs_1[remote_rank], &eparams);
         if (status != NIXL_SUCCESS) {
-            HOST_LOG_ERROR("_nixl_ep_counters_prepare: rank %d failed createXferReq for counter_1 to remote_rank %d, "
-                          "remote_addr=%p, device_id=%d, status=%d",
-                          rank, remote_rank, (void*)remote_counter_addr, 
-                          nixl_peer_info[remote_rank].device_id, status);
+            printf("[ERROR] _nixl_ep_counters_prepare: rank %d failed createXferReq for counter_1 to remote_rank %d, "
+                   "remote_addr=%p, device_id=%d, status=%d\n",
+                   rank, remote_rank, (void*)remote_counter_addr, 
+                   nixl_peer_info[remote_rank].device_id, status);
+            fflush(stdout);
         }
         EP_HOST_ASSERT(status == NIXL_SUCCESS);
         EP_HOST_ASSERT(nixl_agent_info->agent->createGpuXferReq(*ep_ctx->cpu_remote_counter_reqs_1[remote_rank], ep_ctx->gpu_remote_counter_reqs_1[remote_rank]) == NIXL_SUCCESS);
