@@ -492,10 +492,12 @@ def worker(torch_rank: int, args: argparse.Namespace):
         explicitly_destroy=True,
         enable_shrink=True,
         tcp_store_group=tcp_store,
+        low_latency_mode=True,
     )
     buffer.update_memory_buffers(
         num_ranks=max_num_ranks,
         num_experts_per_rank=args.num_experts_per_rank,
+        num_nvl_bytes=0,
         num_rdma_bytes=num_rdma_bytes,
     )
     signal.signal(
