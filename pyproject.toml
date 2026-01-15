@@ -22,8 +22,7 @@ name = "nixl-cu12"
 version = "0.9.0"
 description = "NIXL Python API"
 readme = "README.md"
-license = "MIT AND Apache-2.0"
-license-files = ["LICENSE"]
+license = {text = "MIT AND Apache-2.0"}
 requires-python = ">=3.10"
 authors = [
   {name = "NIXL Developers", email = "nixl-developers@nvidia.com"}
