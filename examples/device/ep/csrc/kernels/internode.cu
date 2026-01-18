@@ -82,25 +82,21 @@ __forceinline__ __device__ void nixl_barrier(nixl_ep::gpu_nixl_ctx nixl_ctx) {
     int rdma_rank = nixl_ctx.rank / NUM_MAX_NVL_PEERS;
     uint64_t poll_counter = 0;
 
-    nixlGpuXferStatusH request_statuses[NUM_MAX_RDMA_PEERS];
-    int num_signals_sent = 0;
-
+    // Send barrier signals to all other RDMA ranks
     for (int i = 0; i < nixl_ctx.num_rdma_ranks; i++) {
         if (i == rdma_rank) continue;
         nixlGpuXferReqH remote_barrier_handle = nixl_ctx.remote_barrier_get(i);
-        DEVICE_LOG_DEBUG("rank %d nixl_barrier | sending signal to rank %d", nixl_ctx.rank, i);
-        nixl_status_t status = nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(
-            remote_barrier_handle, 0, 1, 0, 0, true, &request_statuses[num_signals_sent]);
+        nixlGpuXferStatusH request_status;
+        DEVICE_LOG_DEBUG("rank %d nixl_barrier | sending barrier signal to rdma_rank %d", nixl_ctx.rank, i);
+        // Use PostPartialWriteXferReq to increment remote barrier counter by 1
+        nixl_status_t status = nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::THREAD>(
+            remote_barrier_handle, 0, nullptr, nullptr, nullptr, nullptr, 0, 1, 0, 0, true, &request_status);
         EP_DEVICE_ASSERT(status == NIXL_IN_PROG);
-        num_signals_sent++;
-    }
-
-    for (int i = 0; i < num_signals_sent; i++) {
-        nixl_status_t status;
-        while ((status = nixlGpuGetXferStatus<nixl_gpu_level_t::THREAD>(request_statuses[i])) == NIXL_IN_PROG);
+        while ((status = nixlGpuGetXferStatus<nixl_gpu_level_t::THREAD>(request_status)) == NIXL_IN_PROG);
         EP_DEVICE_ASSERT(status == NIXL_SUCCESS);
     }
 
+    // Wait for all other RDMA ranks to signal us
     uint64_t epoch = ld_acquire_sys_global(nixl_ctx.last_barrier_counter);
     uint64_t expected_counter = (epoch + 1) * (nixl_ctx.num_rdma_ranks - 1);
     DEVICE_LOG_DEBUG("rank %d nixl_barrier epoch: %lu, expected_counter: %lu", nixl_ctx.rank, epoch, expected_counter);
