@@ -146,11 +146,15 @@ def test_main(args: argparse.Namespace, num_sms: int,
                         dispatch_args = {'x': current_x, 'handle': handle, 'config': config, 'async_finish': async_mode}
                         if previous_mode:
                             dispatch_args.update({'previous_event': buffer.capture()})
-                        recv_x, _, _, _, _, event = buffer.internode_dispatch(**dispatch_args)
+                        recv_x_cached, _, _, _, _, event = buffer.internode_dispatch(**dispatch_args)
                         event.current_stream_wait() if async_mode else ()
-                        recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
+                        recv_x_cached = per_token_cast_back(*recv_x_cached) if isinstance(recv_x_cached, tuple) else recv_x_cached
+                        
                         if current_x is not x_pure_rand:
-                            check_data(recv_x, recv_gbl_rank_prefix_sum)
+                            check_data(recv_x_cached, recv_gbl_rank_prefix_sum)
+                        
+                        # Use cached result for combine
+                        recv_x = recv_x_cached
 
                     # Test combine
                     bias_0 = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
@@ -162,8 +166,10 @@ def test_main(args: argparse.Namespace, num_sms: int,
                         combine_args.update({'previous_event': buffer.capture()})
                     combined_x, combined_topk_weights, event = buffer.internode_combine(**combine_args)
                     event.current_stream_wait() if async_mode else ()
+                    
                     check_x = (combined_x.float() - bias_0.float() - bias_1.float()) / is_token_in_rank.sum(dim=1).unsqueeze(1)
                     ref_x = x_pure_rand if current_x is x_pure_rand else x
+                    
                     assert calc_diff(check_x, ref_x) < 5e-6
                     if with_topk:
                         check_topk_weights = combined_topk_weights if (current_x is x_pure_rand) else (combined_topk_weights / is_token_in_rank.sum(dim=1).unsqueeze(1))
@@ -176,8 +182,11 @@ def test_main(args: argparse.Namespace, num_sms: int,
                     combine_bf16_nvl_send_bytes = dispatch_bf16_nvl_recv_bytes
                     combine_bf16_rdma_recv_bytes = dispatch_bf16_rdma_send_bytes
 
+                    # Sync all ranks before printing passed
+                    group.barrier()
                     if local_rank == 0:
                         print(' passed', flush=True)
+                    group.barrier()
     if local_rank == 0:
         print('', flush=True)
 

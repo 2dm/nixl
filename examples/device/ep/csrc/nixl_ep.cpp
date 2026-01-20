@@ -1381,37 +1381,71 @@ void Buffer::_nixl_agent_init() {
 void Buffer::_nixl_ep_batches_prepare(const std::vector<int>& ranks) {
     nixl_status_t status;
 
-    for (int j : ranks) {
-        if (j == rank) continue; // Skip self
-        if (nixl_ctx->gpu_batch_reqs[j]) continue; // Skip if already exported
-        nixl_xfer_dlist_t src_vram(VRAM_SEG);
-        src_vram.addDesc(nixlBlobDesc((uintptr_t)(rdma_buffer_ptr), num_rdma_bytes, get_local_device_id(), ""));
-        nixl_xfer_dlist_t dst_vram(VRAM_SEG);
-        dst_vram.addDesc(nixlBlobDesc((uintptr_t)(nixl_peer_info[j].rdma_buffer_ptr), num_rdma_bytes, nixl_peer_info[j].device_id, ""));
-        nixl_opt_args_t extra_params = {};
-        extra_params.backends.push_back(nixl_agent_info->backend);
-        status = nixl_agent_info->agent->createXferReq(NIXL_WRITE, src_vram, dst_vram, nixl_agent_info->remote_agent_names[j], nixl_ctx->cpu_batch_reqs[j], &extra_params);
-        EP_HOST_ASSERT(status == NIXL_SUCCESS);
-        EP_HOST_ASSERT(nixl_agent_info->agent->createGpuXferReq(*nixl_ctx->cpu_batch_reqs[j], nixl_ctx->gpu_batch_reqs[j]) == NIXL_SUCCESS);
+    if (low_latency_mode) {
+        // Low-latency mode: create requests for each global rank
+        for (int j : ranks) {
+            if (j == rank) continue; // Skip self
+            if (nixl_ctx->gpu_batch_reqs[j]) continue; // Skip if already exported
+            
+            nixl_xfer_dlist_t src_vram(VRAM_SEG);
+            src_vram.addDesc(nixlBlobDesc((uintptr_t)(rdma_buffer_ptr), num_rdma_bytes, get_local_device_id(), ""));
+            nixl_xfer_dlist_t dst_vram(VRAM_SEG);
+            dst_vram.addDesc(nixlBlobDesc((uintptr_t)(nixl_peer_info[j].rdma_buffer_ptr), num_rdma_bytes, nixl_peer_info[j].device_id, ""));
+            nixl_opt_args_t extra_params = {};
+            extra_params.backends.push_back(nixl_agent_info->backend);
+            status = nixl_agent_info->agent->createXferReq(NIXL_WRITE, src_vram, dst_vram, nixl_agent_info->remote_agent_names[j], nixl_ctx->cpu_batch_reqs[j], &extra_params);
+            EP_HOST_ASSERT(status == NIXL_SUCCESS);
+            EP_HOST_ASSERT(nixl_agent_info->agent->createGpuXferReq(*nixl_ctx->cpu_batch_reqs[j], nixl_ctx->gpu_batch_reqs[j]) == NIXL_SUCCESS);
 
-        // Create barrier requests - destination depends on mode
-        if (low_latency_mode) {
-            // Low-latency mode: write to sync_buffer_ptr (int array)
+            // Low-latency barrier: write to sync_buffer_ptr (int array), indexed by global rank
             nixl_xfer_dlist_t src_vram_ll(VRAM_SEG);
             src_vram_ll.addDesc(nixlBlobDesc((uintptr_t)(local_barrier_cnt_ptr), max_num_ranks * sizeof(int), get_local_device_id(), ""));
             nixl_xfer_dlist_t dst_vram_ll(VRAM_SEG);
             dst_vram_ll.addDesc(nixlBlobDesc((uintptr_t)(nixl_peer_info[j].sync_buffer_ptr), max_num_ranks * sizeof(int), nixl_peer_info[j].device_id, ""));
             EP_HOST_ASSERT(nixl_agent_info->agent->createXferReq(NIXL_WRITE, src_vram_ll, dst_vram_ll, nixl_agent_info->remote_agent_names[j], nixl_ctx->cpu_barrier_reqs[j], &extra_params) == NIXL_SUCCESS);
             EP_HOST_ASSERT(nixl_agent_info->agent->createGpuXferReq(*nixl_ctx->cpu_barrier_reqs[j], nixl_ctx->gpu_barrier_reqs[j]) == NIXL_SUCCESS);
-        } else {
-            // Internode (high-throughput) mode: write signal to barrier_ptr (uint64_t)
-            // Use dummy source for signal-based transfer
-            nixl_xfer_dlist_t dummy_src(VRAM_SEG);
-            dummy_src.addDesc(nixlBlobDesc((uintptr_t)(local_barrier_counter), sizeof(uint64_t), get_local_device_id(), ""));
-            nixl_xfer_dlist_t barrier_dst(VRAM_SEG);
-            barrier_dst.addDesc(nixlBlobDesc((uintptr_t)(nixl_peer_info[j].barrier_ptr), sizeof(uint64_t), nixl_peer_info[j].device_id, ""));
-            EP_HOST_ASSERT(nixl_agent_info->agent->createXferReq(NIXL_WRITE, dummy_src, barrier_dst, nixl_agent_info->remote_agent_names[j], nixl_ctx->cpu_barrier_reqs[j], &extra_params) == NIXL_SUCCESS);
-            EP_HOST_ASSERT(nixl_agent_info->agent->createGpuXferReq(*nixl_ctx->cpu_barrier_reqs[j], nixl_ctx->gpu_barrier_reqs[j]) == NIXL_SUCCESS);
+        }
+    } else {
+        // Internode mode: create requests indexed by RDMA rank, targeting peer (same nvl_rank on remote node)
+        for (int remote_rdma_rank = 0; remote_rdma_rank < num_rdma_ranks; remote_rdma_rank++) {
+            if (remote_rdma_rank == rdma_rank) continue; // Skip self RDMA rank
+            
+            int remote_rank = nvl_rank + remote_rdma_rank * NUM_MAX_NVL_PEERS;
+            
+            // Check if we have peer info for this rank
+            if (remote_rank >= static_cast<int>(nixl_peer_info.size()) || nixl_peer_info[remote_rank].barrier_ptr == nullptr) {
+                continue;
+            }
+
+            nixl_opt_args_t extra_params = {};
+            extra_params.backends.push_back(nixl_agent_info->backend);
+
+            // Create batch request (indexed by RDMA rank)
+            if (!nixl_ctx->gpu_batch_reqs[remote_rdma_rank]) {
+                nixl_xfer_dlist_t src_vram(VRAM_SEG);
+                src_vram.addDesc(nixlBlobDesc((uintptr_t)(rdma_buffer_ptr), num_rdma_bytes, get_local_device_id(), ""));
+                nixl_xfer_dlist_t dst_vram(VRAM_SEG);
+                dst_vram.addDesc(nixlBlobDesc((uintptr_t)(nixl_peer_info[remote_rank].rdma_buffer_ptr), num_rdma_bytes, nixl_peer_info[remote_rank].device_id, ""));
+                
+                status = nixl_agent_info->agent->createXferReq(NIXL_WRITE, src_vram, dst_vram, 
+                    nixl_agent_info->remote_agent_names[remote_rank], nixl_ctx->cpu_batch_reqs[remote_rdma_rank], &extra_params);
+                EP_HOST_ASSERT(status == NIXL_SUCCESS);
+                EP_HOST_ASSERT(nixl_agent_info->agent->createGpuXferReq(*nixl_ctx->cpu_batch_reqs[remote_rdma_rank], 
+                    nixl_ctx->gpu_batch_reqs[remote_rdma_rank]) == NIXL_SUCCESS);
+            }
+
+            // Create barrier request (indexed by RDMA rank)
+            if (!nixl_ctx->gpu_barrier_reqs[remote_rdma_rank]) {
+                nixl_xfer_dlist_t dummy_src(VRAM_SEG);
+                dummy_src.addDesc(nixlBlobDesc((uintptr_t)(local_barrier_counter), sizeof(uint64_t), get_local_device_id(), ""));
+                nixl_xfer_dlist_t barrier_dst(VRAM_SEG);
+                barrier_dst.addDesc(nixlBlobDesc((uintptr_t)(nixl_peer_info[remote_rank].barrier_ptr), sizeof(uint64_t), nixl_peer_info[remote_rank].device_id, ""));
+                
+                EP_HOST_ASSERT(nixl_agent_info->agent->createXferReq(NIXL_WRITE, dummy_src, barrier_dst, 
+                    nixl_agent_info->remote_agent_names[remote_rank], nixl_ctx->cpu_barrier_reqs[remote_rdma_rank], &extra_params) == NIXL_SUCCESS);
+                EP_HOST_ASSERT(nixl_agent_info->agent->createGpuXferReq(*nixl_ctx->cpu_barrier_reqs[remote_rdma_rank], 
+                    nixl_ctx->gpu_barrier_reqs[remote_rdma_rank]) == NIXL_SUCCESS);
+            }
         }
     }
 }
