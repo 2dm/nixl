@@ -1753,10 +1753,13 @@ combine(int4* combined_x, float* combined_topk_weights,
         // RDMA symmetric layout
         void* init_rdma_buffer_ptr = rdma_buffer_ptr;
         auto rdma_channel_data = SymBuffer<int8_t>(rdma_buffer_ptr, num_max_rdma_chunked_recv_tokens * num_bytes_per_token, kNumRDMARanks, channel_id, num_channels);
+        auto rdma_channel_meta = SymBuffer<int>(rdma_buffer_ptr, NUM_MAX_NVL_PEERS * 2 + 2, kNumRDMARanks, channel_id, num_channels);
         auto rdma_channel_head = SymBuffer<uint64_t, false>(rdma_buffer_ptr, 1, kNumRDMARanks, channel_id, num_channels);
         auto rdma_channel_tail = SymBuffer<uint64_t, false>(rdma_buffer_ptr, 1, kNumRDMARanks, channel_id, num_channels);
         uint64_t* channel_local_head_counters = rdma_channel_head.buffer(0);
         uint64_t* channel_local_tail_counters = rdma_channel_tail.buffer(0);
+        (void)rdma_channel_meta;  // Unused in combine, but needed for buffer layout advancement
+
 
         // NVL layouts
         void* local_nvl_buffer = buffer_ptrs[nvl_rank];
