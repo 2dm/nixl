@@ -41,9 +41,11 @@ def test_main(args: argparse.Namespace, num_sms: int,
     group_idx = torch.topk(group_scores, k=num_topk_groups, dim=-1, sorted=False).indices
     masked_scores = create_grouped_scores(scores, group_idx, num_nodes)
     topk_idx = torch.topk(masked_scores, num_topk, dim=-1, largest=True, sorted=False)[1]
+    topk_idx = topk_idx.to(nixl_ep.topk_idx_t)
     topk_weights = torch.ones((num_tokens, num_topk), dtype=torch.float32, device='cuda') * rank
     topk_weights_pure_rand = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda')
     rank_idx = topk_idx // (num_experts // num_ranks)
+    rank_idx = rank_idx.to(torch.int64)
     rank_idx.masked_fill_(topk_idx == -1, -1)
     inplace_unique(rank_idx, num_ranks)
     rdma_rank_idx = rank_idx // num_local_ranks
@@ -169,7 +171,6 @@ def test_main(args: argparse.Namespace, num_sms: int,
                     
                     check_x = (combined_x.float() - bias_0.float() - bias_1.float()) / is_token_in_rank.sum(dim=1).unsqueeze(1)
                     ref_x = x_pure_rand if current_x is x_pure_rand else x
-                    
                     assert calc_diff(check_x, ref_x) < 5e-6
                     if with_topk:
                         check_topk_weights = combined_topk_weights if (current_x is x_pure_rand) else (combined_topk_weights / is_token_in_rank.sum(dim=1).unsqueeze(1))
@@ -242,13 +243,15 @@ def test_main(args: argparse.Namespace, num_sms: int,
 
 # noinspection PyUnboundLocalVariable,PyShadowingNames
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
-    pxb_nics = ["mlx5_0", "mlx5_1", "mlx5_2", "mlx5_4", "mlx5_5", "mlx5_6", "mlx5_7", "mlx5_8"]
-    tcp_nics = ',ibp26s0,ibp44s0,ibp64s0,ibp101s0,ibp156s0,ibp173s0,ibp192s0,ibp227s0'
-    os.environ['UCX_NET_DEVICES'] = f'cuda0-{pxb_nics[local_rank]}:1' + tcp_nics
+    # pxb_nics = ["mlx5_0", "mlx5_1", "mlx5_2", "mlx5_4", "mlx5_5", "mlx5_6", "mlx5_7", "mlx5_8"]
+    # tcp_nics = ',ibp26s0,ibp44s0,ibp64s0,ibp101s0,ibp156s0,ibp173s0,ibp192s0,ibp227s0'
+    # os.environ['UCX_NET_DEVICES'] = f'cuda0-{pxb_nics[local_rank]}:1' + tcp_nics
     os.environ['CUDA_VISIBLE_DEVICES'] = str(local_rank)
 
     num_nodes = int(os.getenv('WORLD_SIZE', 1))
+
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
+    print(f"pid: {os.getpid()}, rank: {rank}, num_ranks: {num_ranks} ,local_rank: {local_rank}", flush=True)
     if args.test_ll_compatibility:
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
 
@@ -263,6 +266,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     )
 
     # Initialize NIXL buffer with group (for IPC handles) and TCPStore (for NIXL metadata)
+    print(f"pid: {os.getpid()}, rank: {rank}, num_ranks: {num_ranks}, initializing buffer", flush=True)
     buffer = nixl_ep.Buffer(rank=rank, low_latency_mode=False, explicitly_destroy=True, group=group, tcp_store_group=tcp_store, nvlink_backend="ipc")
     buffer.update_memory_buffers(num_ranks=num_ranks, num_experts_per_rank=num_qps_per_rank, num_nvl_bytes=int(2e9), num_rdma_bytes=int(1e9))
     buffer.connect_ranks([i for i in range(num_ranks) if i != rank])
