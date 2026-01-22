@@ -91,35 +91,37 @@ __forceinline__ __device__ int rdma_rank_to_global_rank(const int rdma_rank, con
     return rdma_rank * NUM_MAX_NVL_PEERS + nvl_rank;
 }
 
-__forceinline__ __device__ void nixl_barrier(nixl_ep::gpu_nixl_ctx nixl_ctx) {
+__forceinline__ __device__ void nixl_barrier(nixl_ep::gpu_nixl_ctx nixl_ctx, int num_channels) {
     int rdma_rank = nixl_ctx.rank / NUM_MAX_NVL_PEERS;
     uint64_t poll_counter = 0;
 
     // Send barrier signals to all other RDMA ranks 
-    for (int i = 0; i < nixl_ctx.num_rdma_ranks; i++) {
-        if (i == rdma_rank) continue;
-        nixlGpuXferReqH remote_barrier_handle = nixl_ctx.remote_barrier_get(i);
-        nixlGpuXferStatusH request_status;
-        DEVICE_LOG_DEBUG("rank %d nixl_barrier | sending barrier signal to rdma_rank %d", nixl_ctx.rank, i);
-        // Use PostPartialWriteXferReq to increment remote barrier counter by 1
-        nixl_status_t status = nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::THREAD>(
-            remote_barrier_handle, 0, nullptr, nullptr, nullptr, nullptr, 0, 1, 0, 0, true, &request_status);
-        EP_DEVICE_ASSERT(status == NIXL_IN_PROG);
-        while ((status = nixlGpuGetXferStatus<nixl_gpu_level_t::THREAD>(request_status)) == NIXL_IN_PROG);
-        EP_DEVICE_ASSERT(status == NIXL_SUCCESS);
+    for (int j=0; j<num_channels; j++) {
+        for (int i = 0; i < nixl_ctx.num_rdma_ranks; i++) {
+            if (i == rdma_rank) continue;
+            nixlGpuXferReqH remote_barrier_handle = nixl_ctx.remote_barrier_get(i);
+            nixlGpuXferStatusH request_status;
+            DEVICE_LOG_DEBUG("rank %d nixl_barrier | sending barrier signal to rdma_rank %d", nixl_ctx.rank, i);
+            // Use PostSignalXferReq to increment remote barrier counter by 1
+            nixl_status_t status = nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(
+                remote_barrier_handle, 0, 1, 0, j, true, &request_status);
+            EP_DEVICE_ASSERT(status == NIXL_IN_PROG);
+            while ((status = nixlGpuGetXferStatus<nixl_gpu_level_t::THREAD>(request_status)) == NIXL_IN_PROG);
+            EP_DEVICE_ASSERT(status == NIXL_SUCCESS);
+        }
+
+        // Wait for all other RDMA ranks to signal us
+        uint64_t epoch = ld_acquire_sys_global(nixl_ctx.last_barrier_counter);
+        uint64_t expected_counter = (epoch + 1) * (nixl_ctx.num_rdma_ranks - 1);
+        DEVICE_LOG_DEBUG("rank %d nixl_barrier epoch: %lu, expected_counter: %lu", nixl_ctx.rank, epoch, expected_counter);
+
+        while(ld_acquire_sys_global(nixl_ctx.local_barrier_counter_ptr) < expected_counter)
+            if (++poll_counter % 5000000 == 0)
+                DEVICE_LOG_DEBUG("rank %d nixl_barrier waiting for epoch: %ld, local_barrier_counter: %ld, poll_counter: %ld", nixl_ctx.rank, epoch, ld_acquire_sys_global(nixl_ctx.local_barrier_counter_ptr), poll_counter);
+
+        st_release_sys_global(nixl_ctx.last_barrier_counter, epoch + 1);
+        DEVICE_LOG_DEBUG("rank %d nixl_barrier completed epoch: %ld, local_barrier_counter: %ld", nixl_ctx.rank, epoch + 1, ld_acquire_sys_global(nixl_ctx.local_barrier_counter_ptr));
     }
-
-    // Wait for all other RDMA ranks to signal us
-    uint64_t epoch = ld_acquire_sys_global(nixl_ctx.last_barrier_counter);
-    uint64_t expected_counter = (epoch + 1) * (nixl_ctx.num_rdma_ranks - 1);
-    DEVICE_LOG_DEBUG("rank %d nixl_barrier epoch: %lu, expected_counter: %lu", nixl_ctx.rank, epoch, expected_counter);
-
-    while(ld_acquire_sys_global(nixl_ctx.local_barrier_counter_ptr) < expected_counter)
-        if (++poll_counter % 5000000 == 0)
-            DEVICE_LOG_DEBUG("rank %d nixl_barrier waiting for epoch: %ld, local_barrier_counter: %ld, poll_counter: %ld", nixl_ctx.rank, epoch, ld_acquire_sys_global(nixl_ctx.local_barrier_counter_ptr), poll_counter);
-
-    st_release_sys_global(nixl_ctx.last_barrier_counter, epoch + 1);
-    DEVICE_LOG_DEBUG("rank %d nixl_barrier completed epoch: %ld, local_barrier_counter: %ld", nixl_ctx.rank, epoch + 1, ld_acquire_sys_global(nixl_ctx.local_barrier_counter_ptr));
 }
 
 template <bool kLowLatencyMode, int kNumRDMARanks>
@@ -152,7 +154,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
 
         if (thread_id == 32) {
             DEVICE_LOG_DEBUG("rank %d notify_dispatch calling nixl_barrier 1", rank);
-            nixl_barrier(nixl_ctx);
+            nixl_barrier(nixl_ctx, num_channels);
         }
         barrier_block<NUM_MAX_NVL_PEERS, true>(barrier_signal_ptrs, nvl_rank);
 
@@ -185,10 +187,10 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
             if (i != rdma_rank) {
                 size_t src_offset = nixl_ctx.batch_offset_get(reinterpret_cast<uint64_t>(rdma_recv_num_tokens_mixed.send_buffer(i)));
                 size_t dst_offset = nixl_ctx.batch_offset_get(reinterpret_cast<uint64_t>(rdma_recv_num_tokens_mixed.recv_buffer(rdma_rank)));
-                unsigned int dlist_idx = 0;
                 size_t msg_size = (NUM_MAX_NVL_PEERS + num_rdma_experts + 1) * sizeof(int);
                 nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(i, nvl_rank));
-                nixl_status_t status = nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::WARP>(batch_req, 1, &dlist_idx, &msg_size, &src_offset, &dst_offset, 0, 0, 0, 0);
+                nixl_status_t status = nixlGpuPostSingleWriteXferReq<nixl_gpu_level_t::WARP>(
+                    batch_req, 0, src_offset, dst_offset, msg_size, 0, true);
                 EP_DEVICE_ASSERT(status == NIXL_IN_PROG);
             } else {
                 UNROLLED_WARP_COPY(1,
@@ -203,12 +205,11 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         __syncthreads();
 
         // Wait previous operations to be finished
-        __syncthreads();
 
         // Barrier
         if (thread_id == 0){
             DEVICE_LOG_DEBUG("rank %d notify_dispatch calling nixl_barrier 2", rank);
-            nixl_barrier(nixl_ctx);
+            nixl_barrier(nixl_ctx, num_channels);
         }
         __syncthreads();
 
@@ -294,7 +295,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
 
         // Finally barrier
         if (thread_id == 32)
-            nixl_barrier(nixl_ctx);
+            nixl_barrier(nixl_ctx, num_channels);
         barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
     } else {
         // Calculate meta data
@@ -567,12 +568,13 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
             if (dst_rdma_rank != rdma_rank) {
                 size_t src_offset = nixl_ctx.batch_offset_get(reinterpret_cast<uint64_t>(rdma_channel_meta.send_buffer(dst_rdma_rank)));
                 size_t dst_offset = nixl_ctx.batch_offset_get(reinterpret_cast<uint64_t>(rdma_channel_meta.recv_buffer(rdma_rank)));
-                unsigned int dlist_idx = 0;
                 size_t msg_size = sizeof(int) * (NUM_MAX_NVL_PEERS * 2 + 2);
                 DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d channel %d | dst_rdma_rank: %d| RDMA SENDER ISSUE RDMA", rank, warp_id, channel_id, dst_rdma_rank);
                 int translated_rank = translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank);
                 nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translated_rank);
-                EP_DEVICE_ASSERT(nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::WARP>(batch_req, 1, &dlist_idx, &msg_size, &src_offset, &dst_offset, 0, 0, 0, channel_id) == NIXL_IN_PROG);
+                EP_DEVICE_ASSERT(nixlGpuPostSingleWriteXferReq<nixl_gpu_level_t::WARP>(
+                                     batch_req, 0, src_offset, dst_offset, msg_size, channel_id, true) ==
+                                 NIXL_IN_PROG);
                 DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d channel %d | dst_rdma_rank: %d| RDMA SENDER ISSUE RDMA DONE", rank, warp_id, channel_id, dst_rdma_rank);
             }
         }
@@ -809,20 +811,18 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                         reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + dst_slot_idx * num_bytes_per_token);
                     size_t src_offset = nixl_ctx.batch_offset_get(src_ptr);
                     size_t dst_offset = nixl_ctx.batch_offset_get(dst_ptr);
-                    unsigned int dlist_idx = 0;
-                    size_t msg_size = num_bytes_per_msg;
                     DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d channel %d | RDMA SENDER COORDINATOR | dst_rdma_rank: %d | SENDING num_tokens_to_issue: %d |last_issued_tail: %d", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, synced_last_issued_tail);
-                    int translated_rank = translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank);
-                    nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translated_rank);
+                    nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
                     
                     // Calculate signal offset: we need to update channel_local_tail_counters[rdma_rank] on the receiver
                     // This is at rdma_channel_tail.buffer(rdma_rank) on the receiver's RDMA buffer
                     // The offset from rdma_buffer_ptr is: (channel_local_tail_counters - initial_rdma_buffer_ptr) + rdma_rank * sizeof(uint64_t)
                     // But since we're using the same SymBuffer layout on sender and receiver, we can compute it locally
-                    size_t tail_counter_offset = nixl_ctx.batch_offset_get(reinterpret_cast<uint64_t>(rdma_channel_tail.buffer(rdma_rank)));
                     
-                    // Use signal_desc_index=0 (same descriptor as data), signal_offset=tail_counter_offset
-                    EP_DEVICE_ASSERT(nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::WARP>(batch_req, 1, &dlist_idx, &msg_size, &src_offset, &dst_offset, 0, num_tokens_to_issue, tail_counter_offset, channel_id) == NIXL_IN_PROG);
+                    EP_DEVICE_ASSERT(nixlGpuPostSingleWriteXferReq<nixl_gpu_level_t::WARP>(
+                                         batch_req, 0, src_offset, dst_offset, num_bytes_per_msg, channel_id, true) ==
+                                     NIXL_IN_PROG);
+                    // Increment tail counter on the receiver
                     DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d channel %d | RDMA SENDER COORDINATOR - done | dst_rdma_rank: %d | SENDING num_tokens_to_issue: %d |last_issued_tail: %d", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, synced_last_issued_tail);
                 } else {
                     // Lighter fence for local RDMA rank
@@ -839,6 +839,11 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                         atomicAdd(reinterpret_cast<unsigned long long*>(rdma_channel_tail.buffer(dst_rdma_rank)), static_cast<unsigned long long>(num_tokens_to_issue));
                         DEVICE_LOG_DEBUG_LANE(0, "rank %d warp %d | channel %d | dst rdma rank %d | RDMA SENDER COORDINATOR | TAIL UPDATED (local) - done, num_tokens_to_issue: %d, num_tokens_to_send: %d | last_issued_tail: %d | local counter pointer: %p", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, num_tokens_to_send, last_issued_tail, (void*)&channel_local_tail_counters[dst_rdma_rank]);
                     } else {
+                        size_t tail_counter_offset = nixl_ctx.batch_offset_get(reinterpret_cast<uint64_t>(rdma_channel_tail.buffer(rdma_rank)));
+                        nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
+                        EP_DEVICE_ASSERT(nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(
+                            batch_req, 0, num_tokens_to_issue, tail_counter_offset, channel_id, true) ==
+                        NIXL_IN_PROG);
                         // TODO_Roey: is it commented out because the RDMA WRITE xfer already includes the tail update?
                         // DEVICE_LOG_DEBUG_LANE(0, "[DEBUG] rank %d warp %d | channel %d | dst rdma rank %d | RDMA SENDER COORDINATOR | TAIL UPDATED (remote) - signal, num_tokens_to_issue: %d, num_tokens_to_send: %d | last_issued_tail: %d", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, num_tokens_to_send, last_issued_tail);
                         // nixlPostPartialGpuXferReq<NIXL_GPU_XFER_COORDINATION_THREAD>(channel_data_requests_handles[dst_rdma_rank], num_tokens_to_issue, 0, nullptr, nullptr, nullptr, nullptr, nullptr);
@@ -1121,7 +1126,8 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                     size_t head_counter_offset = nixl_ctx.batch_offset_get(reinterpret_cast<uint64_t>(rdma_channel_head.buffer(rdma_rank)));
                     DEVICE_LOG_DEBUG("rank %d warp %d channel %d | KForwarderCoordinator REMOTE HEAD UPDATE | dst_rank: %d| head change: %d| signal_off: %lu", rank, warp_id, channel_id, lane_id, min_head - last_head, head_counter_offset);
                     nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(lane_id, nvl_rank));
-                    nixl_status_t status = nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::THREAD>(batch_req, 0, nullptr, nullptr, nullptr, nullptr, 0, min_head - last_head, head_counter_offset);
+                    nixl_status_t status = nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(
+                        batch_req, 0, min_head - last_head, head_counter_offset);
                     DEVICE_LOG_DEBUG("rank %d warp %d channel %d | KForwarderCoordinator REMOTE HEAD UPDATE - posted request | dst_rank: %d| head change: %d", rank, warp_id, channel_id, lane_id, min_head - last_head);
                     if (status != NIXL_IN_PROG) {
                         DEVICE_LOG_DEBUG("NixlEP dispatch forwarder (RDMA increment) failed, channel: %d, RDMA: %d, nvl: %d, dst RDMA: %d, head: %d, last: %d, chunked: %d",
@@ -1349,7 +1355,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
         // Barrier for RDMA
         if (thread_id == 32) {
             DEVICE_LOG_DEBUG("rank %d warp %d | CACHED NOTIFY | RDMA BARRIER | num_rdma_ranks: %d, num_channels: %d, rank: %d, rdma_rank: %d", rank, warp_id, num_rdma_ranks, num_channels, rank, rdma_rank);
-            nixl_barrier(nixl_ctx);
+            nixl_barrier(nixl_ctx, num_channels);
         }
 
         // Barrier for NVL
@@ -1378,7 +1384,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
 
         // Barrier again
         if (thread_id == 32)
-            nixl_barrier(nixl_ctx);
+            nixl_barrier(nixl_ctx, num_channels);
         barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
     } else if (sm_id == 1) {
         if (is_cached_dispatch)
@@ -1394,7 +1400,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
 
             // NOTES: `1 << 25` is a heuristic large number
             int last_head = 1 << 25;
-            for (int token_idx = token_end_idx - 1; token_idx >= token_start_idx; -- token_idx) {
+            for (int token_idx = token_end_idx - 1; token_idx >= token_start_idx; --token_idx) {
                 auto current_head = __ldg(combined_rdma_head + token_idx * num_rdma_ranks + lane_id);
                 if (current_head < 0) {
                     combined_rdma_head[token_idx * num_rdma_ranks + lane_id] = -last_head - 1;
@@ -1465,9 +1471,11 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
                     tma_store_fence();
                     __syncwarp();
 
-                    if (lane_id == 0) 
-                        tma_store_1d(tma_buffer, combined_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS, (batch_end_idx - batch_start_idx) * num_bytes_per_token);
-                    tma_store_wait();
+                    if (elect_one_sync())
+                        tma_store_1d(tma_buffer,
+                                     combined_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS,
+                                     (batch_end_idx - batch_start_idx) * num_bytes_per_token);
+                    tma_store_wait<0>();
                     __syncwarp();
                 }
             }
@@ -1599,7 +1607,7 @@ __device__ int combine_token(bool is_token_in_rank, int head_idx,
         }
 
         // Flush all writes
-        tma_store_wait();
+        tma_store_wait<0>();
     } else {
         #pragma unroll
         for (int i = lane_id; i < hidden_int4; i += 32) {
@@ -1681,12 +1689,7 @@ combine(int4* combined_x, float* combined_topk_weights,
         void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
         void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
         int rank, int num_ranks, gpu_nixl_ctx nixl_ctx) {
-    enum class WarpRole {
-        kNVLSender,
-        kNVLAndRDMAForwarder,
-        kRDMAReceiver,
-        kCoordinator
-    };
+    enum class WarpRole { kNVLSender, kNVLAndRDMAForwarder, kRDMAReceiver, kCoordinator };
 
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / 32;
@@ -1916,7 +1919,7 @@ combine(int4* combined_x, float* combined_topk_weights,
                         DEVICE_LOG_DEBUG("rank %d warp %d | sync_large_warp barrier %d with %d threads", rank, warp_id, dst_rdma_rank + 2, kNumWarpsPerForwarder * 32);
                     }
 #endif
-                    asm volatile("bar.sync %0, %1;" :: "r"(dst_rdma_rank + 2), "r"(kNumWarpsPerForwarder * 32));
+                    asm volatile("bar.sync %0, %1;" ::"r"(dst_rdma_rank + 2), "r"(kNumWarpsPerForwarder * 32));
                 }
             };
             EP_STATIC_ASSERT(kNumWarpsPerForwarder == 1 or kNumRDMARanks + 2 <= 16, "Barriers are not enough");
@@ -1974,13 +1977,13 @@ combine(int4* combined_x, float* combined_topk_weights,
                     // Timeout check
                     if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
                         printf("NixlEP combine forwarder (RDMA check) timeout, channel: %d, RDMA: %d, nvl: %d, dst RDMA: %d, head: %ld, tail: %d, chunked: %d\n",
-                               channel_id,
-                               rdma_rank,
-                               nvl_rank,
-                               dst_rdma_rank,
-                               ld_volatile_global(rdma_channel_head.buffer(dst_rdma_rank)),
-                               token_start_idx,
-                               num_chunked_tokens);
+                            channel_id,
+                            rdma_rank,
+                            nvl_rank,
+                            dst_rdma_rank,
+                            ld_volatile_global(rdma_channel_head.buffer(dst_rdma_rank)),
+                            token_start_idx,
+                            num_chunked_tokens);
                         trap();
                     }
                 }
@@ -2067,12 +2070,10 @@ combine(int4* combined_x, float* combined_topk_weights,
                             reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + rdma_slot_idx * num_bytes_per_token);
                         const auto src_ptr =
                             reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + rdma_slot_idx * num_bytes_per_token);
-                        size_t src_offset = nixl_ctx.batch_offset_get(src_ptr);
-                        size_t dst_offset = nixl_ctx.batch_offset_get(dst_ptr);
-                        unsigned int dlist_idx = 0;
-                        size_t msg_size = num_bytes_per_msg;
                         nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
-                        EP_DEVICE_ASSERT(nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::WARP>(batch_req, 1, &dlist_idx, &msg_size, &src_offset, &dst_offset, 0, 0, 0, channel_id) == NIXL_IN_PROG);
+                        EP_DEVICE_ASSERT(nixlGpuPostSingleWriteXferReq<nixl_gpu_level_t::WARP>(
+                                             batch_req, 0, nixl_ctx.batch_offset_get(src_ptr), nixl_ctx.batch_offset_get(dst_ptr), num_bytes_per_msg, channel_id, true) ==
+                                         NIXL_IN_PROG);
                     } else {
                         memory_fence();
                     }
@@ -2092,9 +2093,10 @@ combine(int4* combined_x, float* combined_topk_weights,
                             }
                         }else{
                             // Calculate signal offset to update channel_local_tail_counters[rdma_rank] on the receiver
-                            size_t tail_counter_offset = nixl_ctx.batch_offset_get(tail_ptr);
                             nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
-                            EP_DEVICE_ASSERT(nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::THREAD>(batch_req, 0, nullptr, nullptr, nullptr, nullptr, 0, num_chunked_tokens, tail_counter_offset) == NIXL_IN_PROG);
+                            EP_DEVICE_ASSERT(nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(
+                                                 batch_req, 0, num_chunked_tokens, nixl_ctx.batch_offset_get(tail_ptr)) ==
+                                             NIXL_IN_PROG);
                         }
                     }
                 }
@@ -2225,7 +2227,6 @@ combine(int4* combined_x, float* combined_topk_weights,
                     for (int i = 0; i < kNumRDMAReceivers; ++i)
                         if (not rdma_receiver_retired[i])
                             min_head = min(min_head, rdma_receiver_rdma_head[i][dst_rdma_rank]);
-                    // Update head counter: channel_local_head_counters[rdma_rank] on the destination
                     if (min_head != std::numeric_limits<int>::max() and min_head >= last_rdma_head + num_max_rdma_chunked_send_tokens and
                         lane_id < kNumRDMARanks) {
                         auto head_ptr = reinterpret_cast<uint64_t>(rdma_channel_head.buffer(rdma_rank));
@@ -2240,14 +2241,16 @@ combine(int4* combined_x, float* combined_topk_weights,
                             // Calculate signal offset to update channel_local_head_counters[rdma_rank] on the receiver
                             size_t head_counter_offset = nixl_ctx.batch_offset_get(reinterpret_cast<uint64_t>(rdma_channel_head.buffer(rdma_rank)));
                             nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
-                            EP_DEVICE_ASSERT(nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::THREAD>(batch_req, 0, nullptr, nullptr, nullptr, nullptr, 0, min_head - last_rdma_head, head_counter_offset) == NIXL_IN_PROG);
+                            EP_DEVICE_ASSERT(nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(
+                                                 batch_req, 0, min_head - last_rdma_head, head_counter_offset) ==
+                                             NIXL_IN_PROG);
                         }
                         last_rdma_head = min_head;
                     }
                 } else {
                     // Find minimum head for NVL ranks
                     #pragma unroll
-                    for (int i = 0; i < kNumRDMARanks; ++ i) {
+                    for (int i = 0; i < kNumRDMARanks; ++i) {
                         int min_head = std::numeric_limits<int>::max();
                         #pragma unroll
                         for (int j = 0; j < num_warps_per_rdma_rank; ++j)
