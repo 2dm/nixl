@@ -243,9 +243,9 @@ def test_main(args: argparse.Namespace, num_sms: int,
 
 # noinspection PyUnboundLocalVariable,PyShadowingNames
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
-    # pxb_nics = ["mlx5_0", "mlx5_1", "mlx5_2", "mlx5_4", "mlx5_5", "mlx5_6", "mlx5_7", "mlx5_8"]
-    # tcp_nics = ',ibp26s0,ibp44s0,ibp64s0,ibp101s0,ibp156s0,ibp173s0,ibp192s0,ibp227s0'
-    # os.environ['UCX_NET_DEVICES'] = f'cuda0-{pxb_nics[local_rank]}:1' + tcp_nics
+    pxb_nics = ["mlx5_0", "mlx5_1", "mlx5_2", "mlx5_4", "mlx5_5", "mlx5_6", "mlx5_7", "mlx5_8"]
+    tcp_nics = ',ibp26s0,ibp44s0,ibp64s0,ibp101s0,ibp156s0,ibp173s0,ibp192s0,ibp227s0'
+    os.environ['UCX_NET_DEVICES'] = f'cuda0-{pxb_nics[local_rank]}:1' + tcp_nics
     os.environ['CUDA_VISIBLE_DEVICES'] = str(local_rank)
 
     num_nodes = int(os.getenv('WORLD_SIZE', 1))
