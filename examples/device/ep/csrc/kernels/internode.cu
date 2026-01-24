@@ -811,45 +811,32 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                         reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + dst_slot_idx * num_bytes_per_token);
                     size_t src_offset = nixl_ctx.batch_offset_get(src_ptr);
                     size_t dst_offset = nixl_ctx.batch_offset_get(dst_ptr);
+                    size_t tail_counter_offset = nixl_ctx.batch_offset_get(reinterpret_cast<uint64_t>(rdma_channel_tail.buffer(rdma_rank)));
                     DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d channel %d | RDMA SENDER COORDINATOR | dst_rdma_rank: %d | SENDING num_tokens_to_issue: %d |last_issued_tail: %d", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, synced_last_issued_tail);
                     nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
 
-                    // Post data write and get status handle
-                    nixlGpuXferStatusH data_write_status;
-                    EP_DEVICE_ASSERT(nixlGpuPostSingleWriteXferReq<nixl_gpu_level_t::WARP>(
-                                         batch_req, 0, src_offset, dst_offset, num_bytes_per_msg, channel_id, true, &data_write_status) ==
+                    // Use combined write+signal API to match nvshmem put+AMO ordering
+                    // This guarantees tail signal arrives after data payload
+                    unsigned desc_index = 0;
+                    EP_DEVICE_ASSERT(nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::WARP>(
+                                         batch_req, 1, &desc_index, &num_bytes_per_msg, &src_offset, &dst_offset,
+                                         0, num_tokens_to_issue, tail_counter_offset, channel_id, true) ==
                                      NIXL_IN_PROG);
-
-                    // Wait for data write to complete before signaling tail counter
-                    // This ensures receiver doesn't read stale data before payload arrives
-                    nixl_status_t write_status;
-                    while ((write_status = nixlGpuGetXferStatus<nixl_gpu_level_t::WARP>(data_write_status)) == NIXL_IN_PROG);
-                    EP_DEVICE_ASSERT(write_status == NIXL_SUCCESS);
-
-                    DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d channel %d | RDMA SENDER COORDINATOR - data write complete | dst_rdma_rank: %d | SENDING num_tokens_to_issue: %d |last_issued_tail: %d", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, synced_last_issued_tail);
+                    DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d channel %d | RDMA SENDER COORDINATOR - done | dst_rdma_rank: %d | SENDING num_tokens_to_issue: %d |last_issued_tail: %d", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, synced_last_issued_tail);
                 } else {
                     // Lighter fence for local RDMA rank
                     memory_fence();
                 }
                 __syncwarp();
 
-                // Update tails
+                // Update local state
                 if (lane_id == dst_rdma_rank) {
                     last_issued_tail += num_tokens_to_issue;
                     num_tokens_to_send -= num_tokens_to_issue;
                     if (dst_rdma_rank == rdma_rank) {
-                        DEVICE_LOG_DEBUG_LANE(0, "rank %d warp %d | channel %d | dst rdma rank %d | RDMA SENDER COORDINATOR | TAIL UPDATED (local), num_tokens_to_issue: %d, num_tokens_to_send: %d | last_issued_tail: %d | local counter pointer: %p", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, num_tokens_to_send, last_issued_tail, (void*)&channel_local_tail_counters[dst_rdma_rank]);
+                        // For local rank, manually update tail counter (remote is updated by signal)
+                        DEVICE_LOG_DEBUG_LANE(0, "rank %d warp %d | channel %d | dst rdma rank %d | RDMA SENDER COORDINATOR | TAIL UPDATED (local), num_tokens_to_issue: %d, num_tokens_to_send: %d | last_issued_tail: %d", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, num_tokens_to_send, last_issued_tail);
                         atomicAdd(reinterpret_cast<unsigned long long*>(rdma_channel_tail.buffer(dst_rdma_rank)), static_cast<unsigned long long>(num_tokens_to_issue));
-                        DEVICE_LOG_DEBUG_LANE(0, "rank %d warp %d | channel %d | dst rdma rank %d | RDMA SENDER COORDINATOR | TAIL UPDATED (local) - done, num_tokens_to_issue: %d, num_tokens_to_send: %d | last_issued_tail: %d | local counter pointer: %p", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, num_tokens_to_send, last_issued_tail, (void*)&channel_local_tail_counters[dst_rdma_rank]);
-                    } else {
-                        size_t tail_counter_offset = nixl_ctx.batch_offset_get(reinterpret_cast<uint64_t>(rdma_channel_tail.buffer(rdma_rank)));
-                        nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
-                        EP_DEVICE_ASSERT(nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(
-                            batch_req, 0, num_tokens_to_issue, tail_counter_offset, channel_id, true) ==
-                        NIXL_IN_PROG);
-                        // TODO_Roey: is it commented out because the RDMA WRITE xfer already includes the tail update?
-                        // DEVICE_LOG_DEBUG_LANE(0, "[DEBUG] rank %d warp %d | channel %d | dst rdma rank %d | RDMA SENDER COORDINATOR | TAIL UPDATED (remote) - signal, num_tokens_to_issue: %d, num_tokens_to_send: %d | last_issued_tail: %d", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, num_tokens_to_send, last_issued_tail);
-                        // nixlPostPartialGpuXferReq<NIXL_GPU_XFER_COORDINATION_THREAD>(channel_data_requests_handles[dst_rdma_rank], num_tokens_to_issue, 0, nullptr, nullptr, nullptr, nullptr, nullptr);
                     }
                 }
                 __syncwarp();
@@ -2066,49 +2053,45 @@ combine(int4* combined_x, float* combined_topk_weights,
                 DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d | NVL FORWARDER sync_large_warp done, lane_id: %d, num_chunked_tokens: %d", rank, warp_id, lane_id, num_chunked_tokens);
                 // Issue RDMA send
                 if (sub_warp_id == kNumWarpsPerForwarder - 1) {
+                    auto rdma_slot_idx = token_start_idx % num_max_rdma_chunked_recv_tokens;
+                    const size_t num_bytes_per_msg = num_chunked_tokens * num_bytes_per_token;
+                    const auto dst_ptr =
+                        reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + rdma_slot_idx * num_bytes_per_token);
+                    const auto src_ptr =
+                        reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + rdma_slot_idx * num_bytes_per_token);
+                    auto tail_ptr = reinterpret_cast<uint64_t>(rdma_channel_tail.buffer(rdma_rank));
+
                     if (dst_rdma_rank != rdma_rank) {
-                        auto rdma_slot_idx = token_start_idx % num_max_rdma_chunked_recv_tokens;
-                        const size_t num_bytes_per_msg = num_chunked_tokens * num_bytes_per_token;
-                        const auto dst_ptr =
-                            reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + rdma_slot_idx * num_bytes_per_token);
-                        const auto src_ptr =
-                            reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + rdma_slot_idx * num_bytes_per_token);
                         nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
-
-                        // Post data write and get status handle
-                        nixlGpuXferStatusH data_write_status;
-                        EP_DEVICE_ASSERT(nixlGpuPostSingleWriteXferReq<nixl_gpu_level_t::WARP>(
-                                             batch_req, 0, nixl_ctx.batch_offset_get(src_ptr), nixl_ctx.batch_offset_get(dst_ptr), num_bytes_per_msg, channel_id, true, &data_write_status) ==
-                                         NIXL_IN_PROG);
-
-                        // Wait for data write to complete before signaling tail counter
-                        // This ensures receiver doesn't read stale data before payload arrives
-                        nixl_status_t write_status;
-                        while ((write_status = nixlGpuGetXferStatus<nixl_gpu_level_t::WARP>(data_write_status)) == NIXL_IN_PROG);
-                        EP_DEVICE_ASSERT(write_status == NIXL_SUCCESS);
-                    } else {
-                        memory_fence();
-                    }
-
-                    // Write new RDMA tail
-                    __syncwarp();
-                    if (elect_one_sync()) {
-                        // We need to update channel_local_tail_counters[rdma_rank] on the destination
-                        auto tail_ptr = reinterpret_cast<uint64_t>(rdma_channel_tail.buffer(rdma_rank));
                         auto dst_p2p_ptr = nixl_ctx.rdma_p2p_ptr_get(tail_ptr, rdma_rank_to_global_rank(dst_rdma_rank, nvl_rank));
-                        if(dst_rdma_rank == rdma_rank || dst_p2p_ptr != 0){
-                            DEVICE_LOG_DEBUG("rank %d warp %d | RDMA FORWARDER | LOCAL TAIL UPDATED | dst_rdma_rank: %d, channel_id: %d, lane_id: %d, num_chunked_tokens: %d | local counter pointer: %p", rank, warp_id, dst_rdma_rank, channel_id, lane_id, num_chunked_tokens, (void*)rdma_channel_tail.buffer(rdma_rank));
-                            if (dst_rdma_rank == rdma_rank) {
-                                atomicAdd(reinterpret_cast<unsigned long long*>(tail_ptr), static_cast<unsigned long long>(num_chunked_tokens));
-                            } else {
+
+                        if (dst_p2p_ptr != 0) {
+                            // P2P path: separate write + atomic
+                            EP_DEVICE_ASSERT(nixlGpuPostSingleWriteXferReq<nixl_gpu_level_t::WARP>(
+                                                 batch_req, 0, nixl_ctx.batch_offset_get(src_ptr), nixl_ctx.batch_offset_get(dst_ptr), num_bytes_per_msg, channel_id, true) ==
+                                             NIXL_IN_PROG);
+                            __syncwarp();
+                            if (elect_one_sync()) {
+                                DEVICE_LOG_DEBUG("rank %d warp %d | RDMA FORWARDER | P2P TAIL UPDATED | dst_rdma_rank: %d, channel_id: %d, num_chunked_tokens: %d", rank, warp_id, dst_rdma_rank, channel_id, num_chunked_tokens);
                                 atomicAdd(reinterpret_cast<unsigned long long*>(dst_p2p_ptr), static_cast<unsigned long long>(num_chunked_tokens));
                             }
-                        }else{
-                            // Calculate signal offset to update channel_local_tail_counters[rdma_rank] on the receiver
-                            nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
-                            EP_DEVICE_ASSERT(nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(
-                                                 batch_req, 0, num_chunked_tokens, nixl_ctx.batch_offset_get(tail_ptr)) ==
+                        } else {
+                            // RDMA path: use combined write+signal for ordering
+                            unsigned desc_index = 0;
+                            size_t src_offset = nixl_ctx.batch_offset_get(src_ptr);
+                            size_t dst_offset = nixl_ctx.batch_offset_get(dst_ptr);
+                            size_t tail_offset = nixl_ctx.batch_offset_get(tail_ptr);
+                            EP_DEVICE_ASSERT(nixlGpuPostPartialWriteXferReq<nixl_gpu_level_t::WARP>(
+                                                 batch_req, 1, &desc_index, &num_bytes_per_msg, &src_offset, &dst_offset,
+                                                 0, num_chunked_tokens, tail_offset, channel_id, true) ==
                                              NIXL_IN_PROG);
+                        }
+                    } else {
+                        memory_fence();
+                        __syncwarp();
+                        if (elect_one_sync()) {
+                            DEVICE_LOG_DEBUG("rank %d warp %d | RDMA FORWARDER | LOCAL TAIL UPDATED | dst_rdma_rank: %d, channel_id: %d, num_chunked_tokens: %d", rank, warp_id, dst_rdma_rank, channel_id, num_chunked_tokens);
+                            atomicAdd(reinterpret_cast<unsigned long long*>(tail_ptr), static_cast<unsigned long long>(num_chunked_tokens));
                         }
                     }
                 }
