@@ -813,17 +813,20 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                     size_t dst_offset = nixl_ctx.batch_offset_get(dst_ptr);
                     DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d channel %d | RDMA SENDER COORDINATOR | dst_rdma_rank: %d | SENDING num_tokens_to_issue: %d |last_issued_tail: %d", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, synced_last_issued_tail);
                     nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
-                    
-                    // Calculate signal offset: we need to update channel_local_tail_counters[rdma_rank] on the receiver
-                    // This is at rdma_channel_tail.buffer(rdma_rank) on the receiver's RDMA buffer
-                    // The offset from rdma_buffer_ptr is: (channel_local_tail_counters - initial_rdma_buffer_ptr) + rdma_rank * sizeof(uint64_t)
-                    // But since we're using the same SymBuffer layout on sender and receiver, we can compute it locally
-                    
+
+                    // Post data write and get status handle
+                    nixlGpuXferStatusH data_write_status;
                     EP_DEVICE_ASSERT(nixlGpuPostSingleWriteXferReq<nixl_gpu_level_t::WARP>(
-                                         batch_req, 0, src_offset, dst_offset, num_bytes_per_msg, channel_id, true) ==
+                                         batch_req, 0, src_offset, dst_offset, num_bytes_per_msg, channel_id, true, &data_write_status) ==
                                      NIXL_IN_PROG);
-                    // Increment tail counter on the receiver
-                    DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d channel %d | RDMA SENDER COORDINATOR - done | dst_rdma_rank: %d | SENDING num_tokens_to_issue: %d |last_issued_tail: %d", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, synced_last_issued_tail);
+
+                    // Wait for data write to complete before signaling tail counter
+                    // This ensures receiver doesn't read stale data before payload arrives
+                    nixl_status_t write_status;
+                    while ((write_status = nixlGpuGetXferStatus<nixl_gpu_level_t::WARP>(data_write_status)) == NIXL_IN_PROG);
+                    EP_DEVICE_ASSERT(write_status == NIXL_SUCCESS);
+
+                    DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d channel %d | RDMA SENDER COORDINATOR - data write complete | dst_rdma_rank: %d | SENDING num_tokens_to_issue: %d |last_issued_tail: %d", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, synced_last_issued_tail);
                 } else {
                     // Lighter fence for local RDMA rank
                     memory_fence();
@@ -2071,9 +2074,18 @@ combine(int4* combined_x, float* combined_topk_weights,
                         const auto src_ptr =
                             reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + rdma_slot_idx * num_bytes_per_token);
                         nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
+
+                        // Post data write and get status handle
+                        nixlGpuXferStatusH data_write_status;
                         EP_DEVICE_ASSERT(nixlGpuPostSingleWriteXferReq<nixl_gpu_level_t::WARP>(
-                                             batch_req, 0, nixl_ctx.batch_offset_get(src_ptr), nixl_ctx.batch_offset_get(dst_ptr), num_bytes_per_msg, channel_id, true) ==
+                                             batch_req, 0, nixl_ctx.batch_offset_get(src_ptr), nixl_ctx.batch_offset_get(dst_ptr), num_bytes_per_msg, channel_id, true, &data_write_status) ==
                                          NIXL_IN_PROG);
+
+                        // Wait for data write to complete before signaling tail counter
+                        // This ensures receiver doesn't read stale data before payload arrives
+                        nixl_status_t write_status;
+                        while ((write_status = nixlGpuGetXferStatus<nixl_gpu_level_t::WARP>(data_write_status)) == NIXL_IN_PROG);
+                        EP_DEVICE_ASSERT(write_status == NIXL_SUCCESS);
                     } else {
                         memory_fence();
                     }
