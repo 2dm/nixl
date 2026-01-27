@@ -676,12 +676,12 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                 cached_rdma_channel_head = static_cast<int>(ld_volatile_global(rdma_channel_head.buffer(lane_id)));
 #ifdef ENABLE_DEBUG_LOGS
                 if (last_cached_rdma_channel_head != cached_rdma_channel_head) {
-                    DEVICE_LOG_DEBUG_LANE(lane_id, "[DISPATCH DEBUG] rank %d warp %d channel %d | RDMA SENDER HEAD UPDATED | lane_id: %d | cached_rdma_channel_head: %d | last_cached_rdma_channel_head: %d | head pointer: %p", rank, warp_id, channel_id, lane_id, cached_rdma_channel_head, last_cached_rdma_channel_head, (void*)&channel_local_head_counters[lane_id]);
+                    DEVICE_LOG_DEBUG_LANE(lane_id, "[DISPATCH DEBUG] rank %d warp %d channel %d | RDMA SENDER HEAD UPDATED | lane_id: %d | cached_rdma_channel_head: %d | last_cached_rdma_channel_head: %d | head pointer: %p", rank, warp_id, channel_id, lane_id, cached_rdma_channel_head, last_cached_rdma_channel_head, (void*)rdma_channel_head.buffer(lane_id));
                     last_cached_rdma_channel_head = cached_rdma_channel_head;
                 }
 
                 if (remote_head_poll_counter % 50000000 == 0) {
-                    DEVICE_LOG_DEBUG_LANE(lane_id, "[DISPATCH DEBUG] rank %d warp %d channel %d | RDMA SENDER - polling head update| polling counter: %d | lane_id: %d | cached_rdma_channel_head: %d | rdma_tail_idx: %d | head pointer: %p", rank, warp_id, channel_id, remote_head_poll_counter, lane_id, cached_rdma_channel_head, rdma_tail_idx, (void*)&channel_local_head_counters[lane_id]);
+                    DEVICE_LOG_DEBUG_LANE(lane_id, "[DISPATCH DEBUG] rank %d warp %d channel %d | RDMA SENDER - polling head update| polling counter: %d | lane_id: %d | cached_rdma_channel_head: %d | rdma_tail_idx: %d | head pointer: %p", rank, warp_id, channel_id, remote_head_poll_counter, lane_id, cached_rdma_channel_head, rdma_tail_idx, (void*)rdma_channel_head.buffer(lane_id));
                 }
                 remote_head_poll_counter++;
 #endif
@@ -881,11 +881,6 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                     DEVICE_LOG_DEBUG_LANE_SYNC(0,"rank %d warp %d channel %d | RDMA SENDER COORDINATOR | dst_rdma_rank: %d | SENDING num_tokens_to_issue: %d |last_issued_tail: %d", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, synced_last_issued_tail);
                     nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
                     
-                    // Calculate signal offset: we need to update channel_local_tail_counters[rdma_rank] on the receiver
-                    // This is at rdma_channel_tail.buffer(rdma_rank) on the receiver's RDMA buffer
-                    // The offset from rdma_buffer_ptr is: (channel_local_tail_counters - initial_rdma_buffer_ptr) + rdma_rank * sizeof(uint64_t)
-                    // But since we're using the same SymBuffer layout on sender and receiver, we can compute it locally
-                    
                     EP_DEVICE_ASSERT(nixlGpuPostSingleWriteXferReq<nixl_gpu_level_t::WARP>(
                                          batch_req, 0, src_offset, dst_offset, num_bytes_per_msg, channel_id, true) ==
                                      NIXL_IN_PROG);
@@ -902,9 +897,9 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                     last_issued_tail += num_tokens_to_issue;
                     num_tokens_to_send -= num_tokens_to_issue;
                     if (dst_rdma_rank == rdma_rank) {
-                        DEVICE_LOG_DEBUG_LANE(0, "rank %d warp %d | channel %d | dst rdma rank %d | RDMA SENDER COORDINATOR | TAIL UPDATED (local), num_tokens_to_issue: %d, num_tokens_to_send: %d | last_issued_tail: %d | local counter pointer: %p", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, num_tokens_to_send, last_issued_tail, (void*)&channel_local_tail_counters[dst_rdma_rank]);
+                        DEVICE_LOG_DEBUG_LANE(0, "rank %d warp %d | channel %d | dst rdma rank %d | RDMA SENDER COORDINATOR | TAIL UPDATED (local), num_tokens_to_issue: %d, num_tokens_to_send: %d | last_issued_tail: %d | local counter pointer: %p", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, num_tokens_to_send, last_issued_tail, (void*)rdma_channel_tail.buffer(dst_rdma_rank));
                         atomicAdd(reinterpret_cast<unsigned long long*>(rdma_channel_tail.buffer(dst_rdma_rank)), static_cast<unsigned long long>(num_tokens_to_issue));
-                        DEVICE_LOG_DEBUG_LANE(0, "rank %d warp %d | channel %d | dst rdma rank %d | RDMA SENDER COORDINATOR | TAIL UPDATED (local) - done, num_tokens_to_issue: %d, num_tokens_to_send: %d | last_issued_tail: %d | local counter pointer: %p", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, num_tokens_to_send, last_issued_tail, (void*)&channel_local_tail_counters[dst_rdma_rank]);
+                        DEVICE_LOG_DEBUG_LANE(0, "rank %d warp %d | channel %d | dst rdma rank %d | RDMA SENDER COORDINATOR | TAIL UPDATED (local) - done, num_tokens_to_issue: %d, num_tokens_to_send: %d | last_issued_tail: %d | local counter pointer: %p", rank, warp_id, channel_id, dst_rdma_rank, num_tokens_to_issue, num_tokens_to_send, last_issued_tail, (void*)rdma_channel_tail.buffer(dst_rdma_rank));
                     } else {
                         size_t tail_counter_offset = nixl_ctx.batch_offset_get(reinterpret_cast<uint64_t>(rdma_channel_tail.buffer(rdma_rank)));
                         nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
@@ -1031,19 +1026,15 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                         cached_rdma_channel_tail = static_cast<int>(ld_acquire_sys_global(rdma_channel_tail.buffer(src_rdma_rank)));
 #ifdef ENABLE_DEBUG_LOGS
                         if( num_tokens_to_recv_from_rdma > 0 && polling_counter % 50000000 == 0) {//we can print only from one warp
-                            if (channel_local_tail_counters == nullptr || &channel_local_tail_counters[src_rdma_rank] == nullptr) {
-                                DEVICE_LOG_DEBUG("rank %d warp %d channel %d | src_rdma_rank %d, channel_local_tail_counters: %p, ERROR: channel_local_tail_counters[%d] or channel_local_tail_counters is nullptr", rank, warp_id, channel_id, src_rdma_rank, (void*)channel_local_tail_counters, src_rdma_rank);
-                            }else{
-                                DEVICE_LOG_DEBUG("rank %d warp %d channel %d | poll counter %d |src_rdma_rank: %d, cached_rdma_channel_tail: %d, src_rdma_rank tail pointer: %p num_tokens_to_recv_from_rdma: %d",\
-                                     rank, warp_id, channel_id, polling_counter, src_rdma_rank, cached_rdma_channel_tail, (void*)&channel_local_tail_counters[src_rdma_rank], num_tokens_to_recv_from_rdma);
-                            }
+                            DEVICE_LOG_DEBUG("rank %d warp %d channel %d | poll counter %d |src_rdma_rank: %d, cached_rdma_channel_tail: %d, src_rdma_rank tail pointer: %p num_tokens_to_recv_from_rdma: %d",\
+                                 rank, warp_id, channel_id, polling_counter, src_rdma_rank, cached_rdma_channel_tail, (void*)rdma_channel_tail.buffer(src_rdma_rank), num_tokens_to_recv_from_rdma);
                         }
                         polling_counter++;
 #endif
                     }
                     if (__shfl_sync(0xffffffff, cached_rdma_channel_tail > cached_rdma_channel_head, src_rdma_rank))
                     {
-                        DEVICE_LOG_DEBUG_LANE(src_rdma_rank, "rank %d warp %d channel %d src_rdma_rank %d | RDMA CHANNEL TAIL UPDATED | num_tokens_to_recv_from_rdma: %d cached_rdma_channel_tail: %d cached_rdma_channel_head: %d tail pointer: %p", rank, warp_id, channel_id, src_rdma_rank, num_tokens_to_recv_from_rdma, cached_rdma_channel_tail, cached_rdma_channel_head, (void*)&channel_local_tail_counters[src_rdma_rank]);
+                        DEVICE_LOG_DEBUG_LANE(src_rdma_rank, "rank %d warp %d channel %d src_rdma_rank %d | RDMA CHANNEL TAIL UPDATED | num_tokens_to_recv_from_rdma: %d cached_rdma_channel_tail: %d cached_rdma_channel_head: %d tail pointer: %p", rank, warp_id, channel_id, src_rdma_rank, num_tokens_to_recv_from_rdma, cached_rdma_channel_tail, cached_rdma_channel_head, (void*)rdma_channel_tail.buffer(src_rdma_rank));
                         break;
                     }
                 }
@@ -1180,9 +1171,9 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
             if (min_head != std::numeric_limits<int>::max() and min_head >= last_head + num_max_rdma_chunked_send_tokens and
                 lane_id < kNumRDMARanks) {
                 if(lane_id == rdma_rank){
-                    DEVICE_LOG_DEBUG("rank %d warp %d channel %d | KForwarderCoordinator | LOCAL HEAD UPDATE | head change: %d | new_head: %lu| local counter pointer: %p", rank, warp_id, channel_id, min_head - last_head, ld_acquire_sys_global(&channel_local_head_counters[lane_id]), (void*)&channel_local_head_counters[lane_id]);
+                    DEVICE_LOG_DEBUG("rank %d warp %d channel %d | KForwarderCoordinator | LOCAL HEAD UPDATE | head change: %d | new_head: %lu| local counter pointer: %p", rank, warp_id, channel_id, min_head - last_head, ld_acquire_sys_global(rdma_channel_head.buffer(lane_id)), (void*)rdma_channel_head.buffer(lane_id));
                     atomicAdd(reinterpret_cast<unsigned long long*>(rdma_channel_head.buffer(rdma_rank)), static_cast<unsigned long long>(min_head - last_head));
-                    DEVICE_LOG_DEBUG("rank %d warp %d channel %d | KForwarderCoordinator | LOCAL HEAD UPDATE - done | head change: %d | new_head: %lu| local counter pointer: %p", rank, warp_id, channel_id, min_head - last_head, ld_acquire_sys_global(&channel_local_head_counters[lane_id]), (void*)&channel_local_head_counters[lane_id]);
+                    DEVICE_LOG_DEBUG("rank %d warp %d channel %d | KForwarderCoordinator | LOCAL HEAD UPDATE - done | head change: %d | new_head: %lu| local counter pointer: %p", rank, warp_id, channel_id, min_head - last_head, ld_acquire_sys_global(rdma_channel_head.buffer(lane_id)), (void*)rdma_channel_head.buffer(lane_id));
                 }else{
                     size_t head_counter_offset = nixl_ctx.batch_offset_get(reinterpret_cast<uint64_t>(rdma_channel_head.buffer(rdma_rank)));
                     DEVICE_LOG_DEBUG("rank %d warp %d channel %d | KForwarderCoordinator REMOTE HEAD UPDATE | dst_rank: %d| head change: %d| signal_off: %lu", rank, warp_id, channel_id, lane_id, min_head - last_head, head_counter_offset);
@@ -2279,7 +2270,6 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                             DEVICE_LOG_DEBUG("rank %d warp %d | RDMA FORWARDER | LOCAL TAIL UPDATED | dst_rdma_rank: %d, channel_id: %d, lane_id: %d, num_chunked_tokens: %d | local counter pointer: %p", rank, warp_id, dst_rdma_rank, channel_id, lane_id, num_chunked_tokens, (void*)rdma_channel_tail.buffer(rdma_rank));
                             atomicAdd(reinterpret_cast<unsigned long long*>(tail_ptr), static_cast<unsigned long long>(num_chunked_tokens));
                         }else{
-                            // Calculate signal offset to update channel_local_tail_counters[rdma_rank] on the receiver
                             nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
                             EP_DEVICE_ASSERT(nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(
                                                  batch_req, 0, num_chunked_tokens, nixl_ctx.batch_offset_get(tail_ptr)) ==
