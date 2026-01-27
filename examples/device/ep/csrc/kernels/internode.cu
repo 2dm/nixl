@@ -87,10 +87,6 @@ __forceinline__ __device__ int translate_dst_rdma_rank(const int dst_rdma_rank, 
     return kLowLatencyMode ? (dst_rdma_rank * NUM_MAX_NVL_PEERS + nvl_rank) : dst_rdma_rank;
 }
 
-__forceinline__ __device__ int rdma_rank_to_global_rank(const int rdma_rank, const int nvl_rank) {
-    return rdma_rank * NUM_MAX_NVL_PEERS + nvl_rank;
-}
-
 __forceinline__ __device__ void nixl_barrier(nixl_ep::gpu_nixl_ctx nixl_ctx, int num_channels) {
     int rdma_rank = nixl_ctx.rank / NUM_MAX_NVL_PEERS;
     uint64_t poll_counter = 0;
@@ -1183,18 +1179,11 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
             // Update remote head
             if (min_head != std::numeric_limits<int>::max() and min_head >= last_head + num_max_rdma_chunked_send_tokens and
                 lane_id < kNumRDMARanks) {
-                auto head_ptr = reinterpret_cast<uint64_t>(rdma_channel_head.buffer(rdma_rank));
-                auto dst_p2p_ptr = nixl_ctx.rdma_p2p_ptr_get(head_ptr, rdma_rank_to_global_rank(lane_id, nvl_rank));
-                if(lane_id == rdma_rank || dst_p2p_ptr != 0){
-                    DEVICE_LOG_DEBUG("rank %d warp %d channel %d | KForwarderCoordinator | LOCAL HEAD UPDATE | head change: %d | new_head: %lu| local counter pointer: %p", rank, warp_id, channel_id, min_head - last_head, ld_acquire_sys_global(&channel_local_head_counters[rdma_rank]), (void*)&channel_local_head_counters[rdma_rank]);
-                    if (lane_id == rdma_rank) {
-                        atomicAdd(reinterpret_cast<unsigned long long*>(rdma_channel_head.buffer(rdma_rank)), static_cast<unsigned long long>(min_head - last_head));
-                    } else {
-                        atomicAdd(reinterpret_cast<unsigned long long*>(dst_p2p_ptr), static_cast<unsigned long long>(min_head - last_head));
-                    }
-                    DEVICE_LOG_DEBUG("rank %d warp %d channel %d | KForwarderCoordinator | LOCAL HEAD UPDATE - done | head change: %d | new_head: %lu| local counter pointer: %p", rank, warp_id, channel_id, min_head - last_head, ld_acquire_sys_global(&channel_local_head_counters[rdma_rank]), (void*)&channel_local_head_counters[rdma_rank]);
+                if(lane_id == rdma_rank){
+                    DEVICE_LOG_DEBUG("rank %d warp %d channel %d | KForwarderCoordinator | LOCAL HEAD UPDATE | head change: %d | new_head: %lu| local counter pointer: %p", rank, warp_id, channel_id, min_head - last_head, ld_acquire_sys_global(&channel_local_head_counters[lane_id]), (void*)&channel_local_head_counters[lane_id]);
+                    atomicAdd(reinterpret_cast<unsigned long long*>(rdma_channel_head.buffer(rdma_rank)), static_cast<unsigned long long>(min_head - last_head));
+                    DEVICE_LOG_DEBUG("rank %d warp %d channel %d | KForwarderCoordinator | LOCAL HEAD UPDATE - done | head change: %d | new_head: %lu| local counter pointer: %p", rank, warp_id, channel_id, min_head - last_head, ld_acquire_sys_global(&channel_local_head_counters[lane_id]), (void*)&channel_local_head_counters[lane_id]);
                 }else{
-                    // Calculate signal offset to update channel_local_head_counters[rdma_rank] on the receiver
                     size_t head_counter_offset = nixl_ctx.batch_offset_get(reinterpret_cast<uint64_t>(rdma_channel_head.buffer(rdma_rank)));
                     DEVICE_LOG_DEBUG("rank %d warp %d channel %d | KForwarderCoordinator REMOTE HEAD UPDATE | dst_rank: %d| head change: %d| signal_off: %lu", rank, warp_id, channel_id, lane_id, min_head - last_head, head_counter_offset);
                     nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(lane_id, nvl_rank));
@@ -2285,16 +2274,10 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                     // Write new RDMA tail
                     __syncwarp();
                     if (elect_one_sync()) {
-                        // We need to update channel_local_tail_counters[rdma_rank] on the destination
                         auto tail_ptr = reinterpret_cast<uint64_t>(rdma_channel_tail.buffer(rdma_rank));
-                        auto dst_p2p_ptr = nixl_ctx.rdma_p2p_ptr_get(tail_ptr, rdma_rank_to_global_rank(dst_rdma_rank, nvl_rank));
-                        if(dst_rdma_rank == rdma_rank || dst_p2p_ptr != 0){
+                        if(dst_rdma_rank == rdma_rank){
                             DEVICE_LOG_DEBUG("rank %d warp %d | RDMA FORWARDER | LOCAL TAIL UPDATED | dst_rdma_rank: %d, channel_id: %d, lane_id: %d, num_chunked_tokens: %d | local counter pointer: %p", rank, warp_id, dst_rdma_rank, channel_id, lane_id, num_chunked_tokens, (void*)rdma_channel_tail.buffer(rdma_rank));
-                            if (dst_rdma_rank == rdma_rank) {
-                                atomicAdd(reinterpret_cast<unsigned long long*>(tail_ptr), static_cast<unsigned long long>(num_chunked_tokens));
-                            } else {
-                                atomicAdd(reinterpret_cast<unsigned long long*>(dst_p2p_ptr), static_cast<unsigned long long>(num_chunked_tokens));
-                            }
+                            atomicAdd(reinterpret_cast<unsigned long long*>(tail_ptr), static_cast<unsigned long long>(num_chunked_tokens));
                         }else{
                             // Calculate signal offset to update channel_local_tail_counters[rdma_rank] on the receiver
                             nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
@@ -2434,21 +2417,12 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                             min_head = min(min_head, rdma_receiver_rdma_head[i][dst_rdma_rank]);
                     if (min_head != std::numeric_limits<int>::max() and min_head >= last_rdma_head + num_max_rdma_chunked_send_tokens and
                         lane_id < kNumRDMARanks) {
-                        auto head_ptr = reinterpret_cast<uint64_t>(rdma_channel_head.buffer(rdma_rank));
-                        auto dst_p2p_ptr = nixl_ctx.rdma_p2p_ptr_get(head_ptr, rdma_rank_to_global_rank(dst_rdma_rank, nvl_rank));
-                        if (dst_rdma_rank == rdma_rank || dst_p2p_ptr != 0) {
-                            if (dst_rdma_rank == rdma_rank) {
-                                atomicAdd(reinterpret_cast<unsigned long long*>(rdma_channel_head.buffer(rdma_rank)), static_cast<unsigned long long>(min_head - last_rdma_head));
-                            } else {    
-                                atomicAdd(reinterpret_cast<unsigned long long*>(dst_p2p_ptr), static_cast<unsigned long long>(min_head - last_rdma_head));
-                            }
+                        if (dst_rdma_rank == rdma_rank) {
+                            atomicAdd(reinterpret_cast<unsigned long long*>(rdma_channel_head.buffer(rdma_rank)), static_cast<unsigned long long>(min_head - last_rdma_head));
                         } else {
-                            // Calculate signal offset to update channel_local_head_counters[rdma_rank] on the receiver
                             size_t head_counter_offset = nixl_ctx.batch_offset_get(reinterpret_cast<uint64_t>(rdma_channel_head.buffer(rdma_rank)));
                             nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
-                            EP_DEVICE_ASSERT(nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(
-                                                 batch_req, 0, min_head - last_rdma_head, head_counter_offset) ==
-                                             NIXL_IN_PROG);
+                            EP_DEVICE_ASSERT(nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(batch_req, 0, min_head - last_rdma_head, head_counter_offset) == NIXL_IN_PROG);
                         }
                         last_rdma_head = min_head;
                     }
