@@ -151,6 +151,13 @@ void Buffer::init(int num_ranks, int num_experts_per_rank, int64_t num_nvl_bytes
     rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
     num_rdma_ranks = std::max(1, num_ranks / NUM_MAX_NVL_PEERS), num_nvl_ranks = std::min(num_ranks, NUM_MAX_NVL_PEERS);
 
+#ifdef ENABLE_DEBUG_LOGS
+    // Increase printf buffer size to handle large number of debug prints
+    // Must be set before any kernel launches. Default is 1MB, increase to 256MB
+    size_t printf_buffer_size = 256 * 1024 * 1024;
+    CUDA_CHECK(cudaDeviceSetLimit(cudaLimitPrintfFifoSize, printf_buffer_size));
+#endif
+
     // Get device info
     cudaDeviceProp device_prop = {};
     CUDA_CHECK(cudaGetDeviceProperties(&device_prop, device_id));
