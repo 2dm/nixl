@@ -41,6 +41,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include "kernels/exception.cuh"
+#include "kernels/log.cuh"
 #include "nixl.h"
 #include <ifaddrs.h>
 #include <sys/socket.h>
@@ -50,12 +51,6 @@
 #include <sstream>
 
 #define NIXL_ETCD_WATCH_TIMEOUT std::chrono::microseconds(1000000000) // 1000 seconds
-
-#ifdef ENABLE_DEBUG_LOGS
-#define HOST_LOG_DEBUG(fmt, ...) printf("[DEBUG] " fmt "\n", ##__VA_ARGS__)
-#else
-#define HOST_LOG_DEBUG(...)
-#endif
 
 namespace nixl_ep {
 
@@ -477,7 +472,7 @@ void Buffer::connect_ranks(const std::vector<int>& remote_ranks_list, const std:
 
     _nixl_agents_peer_info_gather(new_ranks);
 
-    _nixl_ep_init(new_ranks); //TODO Micha - internode init should be the same 
+    _nixl_ep_init(new_ranks);
 
     CUDA_CHECK(cudaDeviceSynchronize());
 

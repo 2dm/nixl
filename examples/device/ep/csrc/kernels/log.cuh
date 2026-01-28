@@ -1,6 +1,6 @@
 #pragma once
-// TODO Micha: remove after internode debug is done
 #ifdef ENABLE_DEBUG_LOGS
+#define HOST_LOG_DEBUG(fmt, ...) printf("[DEBUG][%s] " fmt "\n", __func__, ##__VA_ARGS__)
 #define DEVICE_LOG_DEBUG(fmt, ...) printf("[DEBUG][%s] " fmt "\n", __func__, ##__VA_ARGS__)
 
 #define _DEVICE_LOG_DEBUG_LANE_IMPL(lane, fmt, ...) do { \
@@ -16,6 +16,7 @@
     __syncwarp(); \
 } while(0)
 #else
+#define HOST_LOG_DEBUG(...)
 #define DEVICE_LOG_DEBUG(...)
 #define DEVICE_LOG_DEBUG_LANE(...)
 #define DEVICE_LOG_DEBUG_LANE_SYNC(...)
