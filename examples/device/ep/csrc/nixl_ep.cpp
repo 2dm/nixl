@@ -302,8 +302,7 @@ void Buffer::destroy() {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     if (num_nvl_bytes > 0) {
-        // Barrier
-        barrier(); //TODO Micha
+        intranode::barrier(barrier_signal_ptrs_gpu, nvl_rank, num_nvl_ranks, comm_stream);
         CUDA_CHECK(cudaDeviceSynchronize());
 
         // Close remote IPC

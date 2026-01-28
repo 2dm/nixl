@@ -30,6 +30,12 @@
 
 namespace nixl_ep {
 
+namespace intranode {
+
+void barrier(int** barrier_signal_ptrs, int rank, int num_nvl_ranks, cudaStream_t stream);
+
+}  // namespace intranode
+
 struct gpu_nixl_ctx {
     nixlGpuXferReqH *batch_reqs; // [dest_rank]
     nixlGpuXferReqH *remote_barrier_reqs; // [dest_rank]

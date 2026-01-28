@@ -73,6 +73,19 @@ cfg.dynamicSmemBytes = smem_size;
 #endif
 #endif
 
+#define SWITCH_NVL_RANKS(case_macro)                           \
+    switch (num_nvl_ranks) {                                   \
+        case 2:                                                \
+            case_macro(2);                                     \
+        case 4:                                                \
+            case_macro(4);                                     \
+        case 8:                                                \
+            case_macro(8);                                     \
+        default:                                               \
+            EP_HOST_ASSERT(false and "Unsupported NVL ranks"); \
+    }                                                          \
+    while (false)
+
 #define SWITCH_RDMA_RANKS(case_macro) \
     switch (num_ranks / NUM_MAX_NVL_PEERS) { \
         case 2: case_macro(2); \
