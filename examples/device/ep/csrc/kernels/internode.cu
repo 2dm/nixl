@@ -89,7 +89,6 @@ __forceinline__ __device__ int translate_dst_rdma_rank(const int dst_rdma_rank, 
 
 __forceinline__ __device__ void nixl_barrier(nixl_ep::gpu_nixl_ctx nixl_ctx, int num_channels) {
     int rdma_rank = nixl_ctx.rank / NUM_MAX_NVL_PEERS;
-    uint64_t poll_counter = 0;
 
     // Send barrier signals to all other RDMA ranks 
     for (int j=0; j<num_channels; j++) {
@@ -107,6 +106,7 @@ __forceinline__ __device__ void nixl_barrier(nixl_ep::gpu_nixl_ctx nixl_ctx, int
         }
 
         // Wait for all other RDMA ranks to signal us
+        uint64_t poll_counter = 0;
         uint64_t epoch = ld_acquire_sys_global(nixl_ctx.last_barrier_counter);
         uint64_t expected_counter = (epoch + 1) * (nixl_ctx.num_rdma_ranks - 1);
         DEVICE_LOG_DEBUG("rank %d nixl_barrier epoch: %lu, expected_counter: %lu", nixl_ctx.rank, epoch, expected_counter);
