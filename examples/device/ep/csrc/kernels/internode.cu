@@ -2272,7 +2272,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                         }else{
                             nixlGpuXferReqH batch_req = nixl_ctx.batch_get(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank));
                             EP_DEVICE_ASSERT(nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(
-                                                 batch_req, 0, num_chunked_tokens, nixl_ctx.batch_offset_get(tail_ptr)) ==
+                                                 batch_req, 0, num_chunked_tokens, nixl_ctx.batch_offset_get(tail_ptr), channel_id) ==
                                              NIXL_IN_PROG);
                         }
                     }
