@@ -492,6 +492,7 @@ def worker(torch_rank: int, args: argparse.Namespace):
         explicitly_destroy=True,
         enable_shrink=True,
         tcp_store_group=tcp_store,
+        low_latency_mode=True,
     )
     buffer.update_memory_buffers(
         num_ranks=max_num_ranks,
