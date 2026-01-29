@@ -64,6 +64,9 @@ endif
 nixl_ep_sources = [
     'csrc/nixl_ep.cpp',
     'csrc/kernels/nixl_ep.cu',
+    'csrc/kernels/internode.cu',
+    'csrc/kernels/layout.cu',
+    'csrc/kernels/runtime.cu',
 ]
 
 nixl_ep_inc_dirs = [
@@ -106,6 +109,13 @@ nixl_ep_cuda_args = [
 topk_idx_bits = meson.get_external_property('topk_idx_bits', '64')
 nixl_ep_cpp_args += ['-DTOPK_IDX_BITS=' + topk_idx_bits]
 nixl_ep_cuda_args += ['-DTOPK_IDX_BITS=' + topk_idx_bits]
+
+# Enable debug logs via ENABLE_DEBUG_LOGS environment variable
+env_debug_logs = run_command('sh', '-c', 'echo $ENABLE_DEBUG_LOGS', check: false).stdout().strip()
+if env_debug_logs != ''
+    nixl_ep_cpp_args += ['-DENABLE_DEBUG_LOGS']
+    nixl_ep_cuda_args += ['-DENABLE_DEBUG_LOGS']
+endif
 
 # NVCC 12.9 workaround for bug (https://nvbugspro.nvidia.com/bug/5595631)
 # This workaround is needed because NVCC 12.9 has a bug which fails UCX compilation
