@@ -466,6 +466,10 @@ def worker(torch_rank: int, args: argparse.Namespace):
     )
 
     # Initialize torch
+    pxb_nics = ["mlx5_0", "mlx5_1", "mlx5_2", "mlx5_4", "mlx5_5", "mlx5_6", "mlx5_7", "mlx5_8"]
+    tcp_nics = ',ibp26s0,ibp44s0,ibp64s0,ibp101s0,ibp156s0,ibp173s0,ibp192s0,ibp227s0'
+    os.environ['UCX_NET_DEVICES'] = f'cuda0-{pxb_nics[local_rank]}:1' + tcp_nics
+
     os.environ["CUDA_VISIBLE_DEVICES"] = str(local_rank % 8)
     torch.set_default_dtype(torch.bfloat16)
     torch.set_default_device("cuda")
