@@ -1459,7 +1459,6 @@ __global__ void cached_notify(const int rdma_clean_offset,
 
     auto nvl_rank = rank % NUM_MAX_NVL_PEERS;
     auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
-    auto rdma_rank = rank / NUM_MAX_NVL_PEERS;
 
     // Using two SMs, which clean the RDMA/NVL buffer respectively
     if (sm_id == 0) {
@@ -1467,7 +1466,7 @@ __global__ void cached_notify(const int rdma_clean_offset,
 
         // Barrier for RDMA
         if (thread_id == 32) {
-            DEVICE_LOG_DEBUG("rank %d warp %d | CACHED NOTIFY | RDMA BARRIER | num_rdma_ranks: %d, num_channels: %d, rank: %d, rdma_rank: %d", rank, warp_id, num_rdma_ranks, num_channels, rank, rdma_rank);
+            DEVICE_LOG_DEBUG("rank %d warp %d | CACHED NOTIFY | RDMA BARRIER | num_rdma_ranks: %d, num_channels: %d, rank: %d, rdma_rank: %d", rank, warp_id, num_rdma_ranks, num_channels, rank, rank / NUM_MAX_NVL_PEERS);
             nixl_barrier(nixl_ctx, num_channels);
         }
 
